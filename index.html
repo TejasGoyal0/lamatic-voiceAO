@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Capture System</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 600px;
+      margin: 40px auto;
+      padding: 20px;
+    }
+    button {
+      padding: 12px 24px;
+      font-size: 16px;
+      cursor: pointer;
+      margin-right: 10px;
+    }
+    #status {
+      margin-top: 20px;
+      padding: 10px;
+      background: #f0f0f0;
+      border-radius: 4px;
+    }
+    #energy-meter {
+      width: 100%;
+      height: 20px;
+      background: #ddd;
+      margin-top: 10px;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    #energy-bar {
+      height: 100%;
+      width: 0%;
+      background: #4caf50;
+      transition: width 50ms;
+    }
+    #pause-log {
+      margin-top: 20px;
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Voice Capture System</h1>
+  <button id="start-btn">Start Recording</button>
+  <button id="stop-btn" disabled>Stop Recording</button>
+  
+  <div id="status">Click "Start Recording" to begin</div>
+  <div id="energy-meter"><div id="energy-bar"></div></div>
+  <div id="pause-log"></div>
+
+  <script src="voice-capture.js"></script>
+  <script>
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const status = document.getElementById('status');
+    const energyBar = document.getElementById('energy-bar');
+    const pauseLog = document.getElementById('pause-log');
+
+    let voiceCapture = null;
+
+    // Callback triggered ONCE when a pause (3s silence) is confirmed
+    function onPauseDetected(data) {
+      const timestamp = new Date().toISOString();
+      const logEntry = document.createElement('div');
+      logEntry.textContent = `[${timestamp}] Pause #${data.segmentCount} - Silence: ${data.silenceDuration.toFixed(2)}s, Threshold: ${data.threshold.toFixed(4)}`;
+      pauseLog.prepend(logEntry);
+      
+      // This is where you'd trigger streaming to Cloudflare RealtimeKit
+      console.log('Pause detected:', data);
+    }
+
+    // Called when speech starts after silence
+    function onSpeechStart(data) {
+      console.log('Speech started:', data);
+    }
+
+    // Energy update callback for visual feedback
+    function onEnergyUpdate(energy, isSpeaking, details) {
+      // Scale energy relative to threshold for meaningful visualization
+      const threshold = details.threshold || 0.01;
+      const scaledEnergy = Math.min((energy / threshold) * 20, 100);
+      energyBar.style.width = `${scaledEnergy}%`;
+      
+      // Color coding: green = speaking, orange = silence, blue = calibrating
+      if (details.state === 'calibrating') {
+        energyBar.style.background = '#2196f3';
+        status.textContent = '🔧 Calibrating noise floor...';
+      } else {
+        energyBar.style.background = isSpeaking ? '#4caf50' : '#ff9800';
+        status.textContent = isSpeaking ? '🎤 Speaking...' : '🔇 Silence...';
+      }
+    }
+
+    // Optional: audio chunk callback for WebRTC streaming prep
+    function onAudioChunk(chunk, metadata) {
+      // chunk is Float32Array of audio samples
+      // metadata: { sampleRate, timestamp, isSpeaking }
+      // Ready for WebRTC: encode and send to Cloudflare Calls
+    }
+
+    startBtn.addEventListener('click', async () => {
+      try {
+        voiceCapture = new VoiceCapture({
+          onPauseDetected,
+          onSpeechStart,
+          onEnergyUpdate,
+          silenceThreshold: 0.015,  // Base RMS threshold
+          noiseMargin: 2.5,         // Multiplier above noise floor
+          pauseDuration: 3000,      // 3 seconds of silence = pause
+          speechMinDuration: 300,   // Ignore sounds < 300ms
+          calibrationDuration: 500, // 500ms noise calibration
+          analysisInterval: 50,     // 20 checks/sec (low CPU)
+          smoothingFactor: 0.7      // Energy smoothing
+        });
+        
+        // Standalone mode: VoiceCapture acquires its own MediaStream
+        // For RealtimeKit integration, use createVoiceSession() instead
+        await voiceCapture.start();
+        
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        status.textContent = '🎤 Recording started...';
+      } catch (err) {
+        status.textContent = `Error: ${err.message}`;
+        console.error('Failed to start voice capture:', err);
+      }
+    });
+
+    stopBtn.addEventListener('click', () => {
+      if (voiceCapture) {
+        voiceCapture.stop();
+        voiceCapture = null;
+      }
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      status.textContent = 'Recording stopped';
+      energyBar.style.width = '0%';
+    });
+  </script>
+</body>
+</html>
