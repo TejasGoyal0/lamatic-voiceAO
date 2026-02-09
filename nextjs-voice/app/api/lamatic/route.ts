@@ -154,17 +154,14 @@ export async function POST(request: NextRequest) {
     // Support both 'topic' (old) and 'transcript' (new) for compatibility
     const inputText = transcript || (body as any).topic;
 
-    if (!workflowId || !inputText) {
-      return NextResponse.json(
-        { success: false, error: 'Missing workflowId or transcript' },
-        { status: 400 }
-      );
-    }
+    // Force English mode hint to prevent the LLM from switching to Hindi
+    // This is prepended to the user's input to guide the LLM's response language.
+    const flavoredInput = `(Strict English Mode) ${inputText}`;
 
-    console.log(`📤 [LamaticAPI] Executing workflow ${workflowId} with text: "${inputText.substring(0, 50)}..."`);
+    console.log(`📤 [LamaticAPI] Executing workflow ${workflowId} with text: "${flavoredInput.substring(0, 50)}..."`);
 
     // Execute the workflow
-    const executeResult = await executeWorkflow(workflowId, inputText);
+    const executeResult = await executeWorkflow(workflowId, flavoredInput);
     console.log('📥 [LamaticAPI] Execute result:', JSON.stringify(executeResult, null, 2));
 
     // Extract response text from result field

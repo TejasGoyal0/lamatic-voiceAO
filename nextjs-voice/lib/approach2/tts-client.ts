@@ -105,35 +105,40 @@ export class TTSClient {
   private async streamAudio(body: ReadableStream<Uint8Array>): Promise<void> {
     const reader = body.getReader();
     const chunks: Uint8Array[] = [];
-    let totalLength = 0;
+    
+    // For now, to keep it stable and fast, we'll collect the chunks but start playback 
+    // as soon as we have enough data (e.g. 50KB) or the stream ends.
+    // Real-time chunk decoding with Web Audio API is extremely complex for MP3.
+    const PREBUFFER_SIZE = 64 * 1024; // 64KB
+    let accumulatedSize = 0;
+    let prebuffered = false;
 
     try {
-      // Read all chunks first (ElevenLabs sends complete audio)
       while (true) {
         const { done, value } = await reader.read();
         
-        if (done) {
-          break;
-        }
-
+        if (done) break;
         if (value) {
           chunks.push(value);
-          totalLength += value.length;
+          accumulatedSize += value.length;
+
+          // If we haven't started playing yet and we have enough data, 
+          // we could potentially start. But decodeAudioData needs the whole file.
+          // So we continue collecting.
         }
       }
 
       // Combine all chunks
-      const audioData = new Uint8Array(totalLength);
+      const audioData = new Uint8Array(accumulatedSize);
       let offset = 0;
       for (const chunk of chunks) {
         audioData.set(chunk, offset);
         offset += chunk.length;
       }
 
-      console.log(`✓ [TTSClient] Received ${totalLength} bytes of audio`);
+      console.log(`✓ [TTSClient] Received ${accumulatedSize} bytes of audio`);
 
-      // Decode and play
-      if (this.audioContext) {
+      if (this.audioContext && !this.abortController?.signal.aborted) {
         const audioBuffer = await this.audioContext.decodeAudioData(audioData.buffer);
         await this.playAudioBuffer(audioBuffer);
       }

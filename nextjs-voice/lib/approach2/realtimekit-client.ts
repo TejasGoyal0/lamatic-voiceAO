@@ -103,12 +103,13 @@ export class RealtimeKitClient {
 
   // Constants
   private readonly smoothingFactor = 0.3;
-  private readonly hysteresisRatio = 1.3;
+  private readonly hysteresisRatio = 2.5; // Increased from 2.0 to be even more selective
+  private readonly minSpeechDuration = 500; // Increased from 300ms to filter out notifications/thuds
 
   constructor(config: RealtimeKitClientConfig) {
     this.authToken = config.authToken;
-    this.pauseDuration = config.pauseDuration ?? 3000;
-    this.calibrationDuration = config.calibrationDuration ?? 500;
+    this.pauseDuration = config.pauseDuration ?? 2000; // Slightly shorter pause for responsiveness if filtered
+    this.calibrationDuration = config.calibrationDuration ?? 1000; // Longer calibration for better floor
     this.onConnected = config.onConnected ?? (() => {});
     this.onDisconnected = config.onDisconnected ?? (() => {});
     this.onPauseDetected = config.onPauseDetected ?? (() => {});
@@ -185,13 +186,7 @@ export class RealtimeKitClient {
     }
 
     console.log('🎧 [RealtimeKitClient] Setting up audio analysis...');
-    console.log('🎧 [RealtimeKitClient] Media stream tracks:', this._mediaStream.getTracks().map(t => ({
-      kind: t.kind,
-      enabled: t.enabled,
-      readyState: t.readyState,
-      label: t.label
-    })));
-
+    
     this.audioContext = new AudioContext();
     console.log('🎧 [RealtimeKitClient] AudioContext state:', this.audioContext.state);
     
@@ -215,6 +210,7 @@ export class RealtimeKitClient {
     // Initialize timing
     this.calibrationStartTime = Date.now();
     this.silenceStartTime = Date.now();
+    this.speechStartTime = 0;
     this.calibrationSamples = [];
     this.isCalibrating = true;
 
@@ -222,21 +218,10 @@ export class RealtimeKitClient {
     this.analysisInterval = setInterval(() => this.analyzeAudio(), 50);
     console.log('✓ [RealtimeKitClient] Audio analysis started - VAD active');
     console.log(`🎚️ [RealtimeKitClient] Pause threshold: ${this.pauseDuration}ms, Calibration: ${this.calibrationDuration}ms`);
-    
-    // Log every second for the first 10 seconds to confirm VAD is running
-    let startupLogCount = 0;
-    const startupLogger = setInterval(() => {
-      startupLogCount++;
-      console.log(`🔊 [VAD STARTUP ${startupLogCount}s] Energy: ${this.currentEnergy.toFixed(4)}, Speaking: ${this.isSpeaking}, Calibrating: ${this.isCalibrating}, AudioCtx: ${this.audioContext?.state}`);
-      if (startupLogCount >= 10) {
-        clearInterval(startupLogger);
-      }
-    }, 1000);
   }
 
   private analyzeAudio(): void {
     if (!this.analyserNode || !this.timeDomainData) {
-      console.warn('⚠️ [RealtimeKitClient] analyzeAudio called but no analyser node');
       return;
     }
 
@@ -262,8 +247,9 @@ export class RealtimeKitClient {
       if (now - this.calibrationStartTime >= this.calibrationDuration) {
         if (this.calibrationSamples.length > 0) {
           const sorted = [...this.calibrationSamples].sort((a, b) => a - b);
-          const percentileIndex = Math.floor(sorted.length * 0.75);
-          this.noiseFloor = Math.max(sorted[percentileIndex], 0.005);
+          // Use a higher percentile for the floor to be more noise-tolerant
+          const percentileIndex = Math.floor(sorted.length * 0.9);
+          this.noiseFloor = Math.max(sorted[percentileIndex], 0.008);
         }
         this.isCalibrating = false;
         console.log(`✓ [RealtimeKitClient] Calibration complete. Noise floor: ${this.noiseFloor.toFixed(4)}`);
@@ -273,22 +259,25 @@ export class RealtimeKitClient {
 
     // Compute thresholds
     const speechThreshold = this.noiseFloor * this.hysteresisRatio;
-    const silenceThreshold = this.noiseFloor;
-
-    // Debug logging every 500ms (more frequent for debugging)
-    if (now % 500 < 50) {
-      console.log(`🎚️ [VAD] Energy: ${this.smoothedEnergy.toFixed(4)}, Noise floor: ${this.noiseFloor.toFixed(4)}, Speaking: ${this.isSpeaking}, Thresholds: speech>${speechThreshold.toFixed(4)}, silence<${silenceThreshold.toFixed(4)}`);
-    }
+    const silenceThreshold = this.noiseFloor * 1.1;
 
     // State transitions
     if (!this.isSpeaking && this.smoothedEnergy > speechThreshold) {
-      this.isSpeaking = true;
-      this.speechStartTime = now;
-      this.silenceStartTime = 0; // Reset silence timer when speech starts
-      console.log(`🗣️ [VAD] Speech started! Energy: ${this.smoothedEnergy.toFixed(4)} > threshold: ${speechThreshold.toFixed(4)}`);
-      this.onSpeechStart();
+      // Start tracking potential speech
+      if (this.speechStartTime === 0) {
+        this.speechStartTime = now;
+      }
+
+      // Only transition to 'speaking' if the sound persists longer than minSpeechDuration
+      // This filters out clicks, pops, and sudden sharp noises
+      if (now - this.speechStartTime >= this.minSpeechDuration) {
+        this.isSpeaking = true;
+        this.silenceStartTime = 0;
+        console.log(`🗣️ [VAD] Speech confirmed! Energy: ${this.smoothedEnergy.toFixed(4)} > threshold: ${speechThreshold.toFixed(4)}`);
+        this.onSpeechStart();
+      }
     } else if (this.isSpeaking && this.smoothedEnergy < silenceThreshold) {
-      // Only set silenceStartTime when we FIRST enter silence (not every frame)
+      // Already speaking, but energy dropped below silence threshold
       if (this.silenceStartTime === 0) {
         this.silenceStartTime = now;
         console.log(`🤫 [VAD] Silence started, waiting for ${this.pauseDuration}ms...`);
@@ -296,14 +285,10 @@ export class RealtimeKitClient {
 
       const silenceDuration = now - this.silenceStartTime;
 
-      // Log progress toward pause detection
-      if (silenceDuration > 0 && silenceDuration % 1000 < 50) {
-        console.log(`⏱️ [VAD] Silence duration: ${silenceDuration}ms / ${this.pauseDuration}ms`);
-      }
-
       if (silenceDuration >= this.pauseDuration) {
         this.isSpeaking = false;
         this.segmentCount++;
+        this.speechStartTime = 0;
 
         console.log(`⏸ [RealtimeKitClient] Pause detected. Segment: ${this.segmentCount}`);
 
@@ -313,16 +298,22 @@ export class RealtimeKitClient {
           timestamp: now,
         });
 
-        this.silenceStartTime = 0; // Reset for next pause detection
+        this.silenceStartTime = 0;
       }
-    } else if (this.isSpeaking) {
-      // Still speaking (above silence threshold), reset silence timer
-      this.silenceStartTime = 0;
-    }
-
-    // Slowly update noise floor during silence
-    if (!this.isSpeaking && this.smoothedEnergy < this.noiseFloor * 2) {
-      this.noiseFloor = 0.995 * this.noiseFloor + 0.005 * this.smoothedEnergy;
+    } else if (this.smoothedEnergy > silenceThreshold) {
+      // Energy is above silence threshold, so we are (or might be) speaking
+      if (this.isSpeaking) {
+        this.silenceStartTime = 0; // Reset silence timer
+      }
+    } else {
+      // Energy is below silence threshold and we are not speaking
+      this.speechStartTime = 0; // Reset potential speech start
+      
+      // Slowly update noise floor during prolonged silence to adapt to room changes
+      // Use a very small factor to avoid adapting to actual speech
+      if (this.smoothedEnergy < this.noiseFloor * 1.5) {
+        this.noiseFloor = 0.998 * this.noiseFloor + 0.002 * this.smoothedEnergy;
+      }
     }
   }
 

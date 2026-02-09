@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
     // ElevenLabs TTS Streaming API
     // Documentation: https://elevenlabs.io/docs/api-reference/text-to-speech/stream
     const elevenLabsResponse = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voice}/stream`,
+      `https://api.elevenlabs.io/v1/text-to-speech/${voice}/stream?optimize_streaming_latency=4`,
       {
         method: 'POST',
         headers: {

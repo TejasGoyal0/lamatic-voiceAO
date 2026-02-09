@@ -160,9 +160,27 @@ export class STTClient {
       console.log('✓ [STTClient] Transcription result:', data);
 
       if (data.text) {
+        let transcriptText = data.text;
+
+        // NOISE FILTERING:
+        // 1. Remove parenthesized noise tags (e.g. "(techno music)", "(clicking)")
+        // These are common from ElevenLabs for non-speech sounds.
+        const cleanText = transcriptText.replace(/\([^)]+\)/g, '').trim();
+
+        if (!cleanText) {
+          console.log('🔇 [STTClient] Filtered out noise-only transcript:', transcriptText);
+          return;
+        }
+
+        // 2. Minimum length check - if it's just a single letter or non-word symbol, skip
+        if (cleanText.length < 3 && !/^[ai0-9]$/i.test(cleanText)) {
+          console.log('🔇 [STTClient] Filtered out too short transcript:', cleanText);
+          return;
+        }
+
         // The API returns the full transcript of the entire audio
         // So we just use it directly, not append
-        this.accumulatedTranscript = data.text;
+        this.accumulatedTranscript = cleanText;
         this.lastTranscribedSize = audioBlob.size;
         
         const result: TranscriptResult = {

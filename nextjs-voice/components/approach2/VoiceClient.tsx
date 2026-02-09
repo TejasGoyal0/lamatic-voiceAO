@@ -173,8 +173,8 @@ export default function VoiceClient() {
       // 5. Initialize RealtimeKit client
       realtimeKitRef.current = new RealtimeKitClient({
         authToken: token,
-        pauseDuration: 3000,
-        calibrationDuration: 500,
+        pauseDuration: 1200,
+        calibrationDuration: 1000,
 
         onConnected: () => {
           console.log('✓ [Approach 2] RealtimeKit connected');
@@ -222,6 +222,11 @@ export default function VoiceClient() {
         },
 
         onSpeechStart: () => {
+          console.log('🗣️ [Approach 2] Speech started - interrupting AI if playing');
+          // BARGE-IN: Stop AI from speaking immediately when user interrupts
+          if (ttsClientRef.current) {
+            ttsClientRef.current.stop();
+          }
           setState(prev => ({ ...prev, status: 'listening', isSpeaking: true }));
         },
 
