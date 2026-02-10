@@ -19,19 +19,43 @@ export interface LamaticResponse {
   success: boolean;
   transcript?: string;
   text?: string;
-  audioUrl?: string;
-  audioBase64?: string;
+  audio?: string; // Base64 audio returned by proxy
   error?: string;
+  status?: string;
 }
 
 export class LamaticClient {
+  /**
+   * Play base64 audio in the browser
+   */
+  static async playAudio(base64: string): Promise<void> {
+    console.log(`🔊 [LamaticClient] Playing audio (${base64.length} chars)...`);
+    try {
+      // Create a blob from base64
+      const binaryString = window.atob(base64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: 'audio/mpeg' }); // ElevenLabs usually returns MP3
+      const url = URL.createObjectURL(blob);
+      
+      const audio = new Audio(url);
+      await audio.play();
+      
+      // Cleanup URL after playing
+      audio.onended = () => URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('❌ [LamaticClient] Error playing audio:', error);
+    }
+  }
   private webhookUrl: string;
   private onResponse: (response: LamaticResponse) => void;
   private onError: (error: Error) => void;
 
   constructor(config: LamaticClientConfig = {}) {
-    // Default webhook URL - can be overridden
-    this.webhookUrl = config.webhookUrl ?? 'https://hooks.lamatic.ai/hook/a943550e-6770-40b2-81de-2aa8f3df1755';
+    // Default webhook URL
+    this.webhookUrl = config.webhookUrl ?? 'https://hooks.lamatic.ai/hook/e6318509-e57e-452f-b117-eee35611ac6f';
     this.onResponse = config.onResponse ?? (() => {});
     this.onError = config.onError ?? (() => {});
   }
@@ -40,22 +64,19 @@ export class LamaticClient {
    * Send audio blob to Lamatic for processing
    */
   async sendAudio(audioBlob: Blob): Promise<LamaticResponse> {
-    console.log(`📤 [LamaticClient] Sending audio to Lamatic... (${audioBlob.size} bytes)`);
+    console.log(`📤 [LamaticClient] Sending base64 audio to Lamatic proxy... (${audioBlob.size} bytes)`);
 
     try {
       // Convert blob to base64
       const base64Audio = await this.blobToBase64(audioBlob);
       
-      const response = await fetch(this.webhookUrl, {
+      const response = await fetch('/api/lamatic', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          type: 'AUDIO_INPUT',
-          audio: base64Audio,
-          mimeType: audioBlob.type,
-          timestamp: Date.now(),
+          audioData: base64Audio,
         }),
       });
 
@@ -66,30 +87,7 @@ export class LamaticClient {
         throw new Error(`Lamatic request failed: ${response.status} - ${errorText}`);
       }
 
-      // Try to parse as JSON, fallback to text
-      let data: LamaticResponse;
-      const contentType = response.headers.get('content-type');
-      
-      if (contentType?.includes('application/json')) {
-        data = await response.json();
-      } else {
-        // Handle non-JSON response (e.g., audio stream)
-        const blob = await response.blob();
-        if (blob.type.startsWith('audio/')) {
-          const audioUrl = URL.createObjectURL(blob);
-          data = {
-            success: true,
-            audioUrl,
-          };
-        } else {
-          const text = await blob.text();
-          data = {
-            success: true,
-            text,
-          };
-        }
-      }
-
+      const data = await response.json();
       console.log('✓ [LamaticClient] Response received:', data);
       this.onResponse(data);
       return data;
@@ -106,18 +104,17 @@ export class LamaticClient {
    * Send text message to Lamatic
    */
   async sendText(text: string): Promise<LamaticResponse> {
-    console.log(`📤 [LamaticClient] Sending text to Lamatic: "${text}"`);
+    console.log(`📤 [LamaticClient] Sending text to Lamatic via GraphQL: "${text}"`);
 
     try {
-      const response = await fetch(this.webhookUrl, {
+      const response = await fetch('/api/lamatic', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          type: 'TEXT_INPUT',
-          text,
-          timestamp: Date.now(),
+          workflowId: 'e6318509-e57e-452f-b117-eee35611ac6f',
+          transcript: text,
         }),
       });
 
@@ -146,9 +143,16 @@ export class LamaticClient {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onloadend = () => {
-        const base64 = reader.result as string;
-        // Remove data URL prefix (e.g., "data:audio/webm;base64,")
-        const base64Data = base64.split(',')[1] || base64;
+        const base64WithPrefix = reader.result as string;
+        // The result will be "data:audio/webm;base64,AAAA..."
+        const base64Data = base64WithPrefix.split(',')[1];
+        
+        if (!base64Data) {
+          reject(new Error("Failed to extract base64 from Data URL"));
+          return;
+        }
+
+        console.log(`📎 [LamaticClient] Generated base64 (${base64Data.length} chars). Header: ${base64Data.substring(0, 15)}`);
         resolve(base64Data);
       };
       reader.onerror = reject;

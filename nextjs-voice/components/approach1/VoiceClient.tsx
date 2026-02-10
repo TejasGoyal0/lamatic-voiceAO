@@ -95,8 +95,8 @@ export default function VoiceClient() {
 
       // Initialize audio capture with VAD
       audioCaptureRef.current = new AudioCapture({
-        pauseDuration: 3000, // 3 seconds of silence triggers pause
-        calibrationDuration: 500,
+        pauseDuration: 1200, // Reduced from 3000ms for responsiveness
+        calibrationDuration: 1000,
         
         onPauseDetected: async (audioBlob) => {
           console.log('⏸ [Approach 1] Pause detected, sending audio to Lamatic...');
@@ -112,7 +112,12 @@ export default function VoiceClient() {
         },
 
         onSpeechStart: () => {
-          console.log('🎤 [Approach 1] Speech started');
+          console.log('🎤 [Approach 1] Speech started - interrupting AI if playing');
+          // BARGE-IN: Stop AI from speaking immediately when user interrupts
+          if (audioElementRef.current) {
+            audioElementRef.current.pause();
+            audioElementRef.current.currentTime = 0;
+          }
           setState(prev => ({ ...prev, status: 'listening', isSpeaking: true }));
         },
 
@@ -145,16 +150,44 @@ export default function VoiceClient() {
   const handleLamaticResponse = async (response: LamaticResponse) => {
     console.log('📥 [Approach 1] Lamatic response:', response);
     
+    const responseText = response.text || '';
+
     setState(prev => ({
       ...prev,
       transcript: response.transcript || prev.transcript,
-      aiResponse: response.text || prev.aiResponse,
+      aiResponse: responseText || prev.aiResponse,
     }));
 
-    // Play audio if present
-    if (response.audioUrl || response.audioBase64) {
+    // If we got audio directly from Lamatic (Workflow TTS)
+    if (response.audio) {
+      console.log('🔊 [Approach 1] Playing audio from Lamatic workflow...');
       setState(prev => ({ ...prev, status: 'playing' }));
-      await playAudio(response.audioUrl || response.audioBase64!);
+      await playAudio(response.audio).catch(err => {
+        console.error('❌ [Approach 1] Workflow audio playback failed:', err);
+      });
+    } 
+    // Fallback: If we got text but no audio, use the local TTS proxy
+    else if (responseText) {
+      setState(prev => ({ ...prev, status: 'playing' }));
+      try {
+        console.log(`🔊 [Approach 1] Requesting local TTS for: "${responseText.substring(0, 50)}..."`);
+        const ttsResponse = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            text: responseText,
+            voiceId: '21m00Tcm4TlvDq8ikWAM' 
+          }),
+        });
+
+        if (ttsResponse.ok) {
+          const audioBlob = await ttsResponse.blob();
+          const audioUrl = URL.createObjectURL(audioBlob);
+          await playAudio(audioUrl);
+        }
+      } catch (err) {
+        console.error('❌ [Approach 1] Local TTS error:', err);
+      }
     }
 
     // Resume listening after playback
@@ -178,26 +211,43 @@ export default function VoiceClient() {
       }
       
       const audio = audioElementRef.current;
-      
-      // Handle base64 or URL
-      if (audioSource.startsWith('data:') || audioSource.startsWith('http')) {
-        audio.src = audioSource;
-      } else {
-        // Assume base64 without data URI prefix
-        audio.src = `data:audio/mp3;base64,${audioSource}`;
+      let url = audioSource;
+
+      // If it's raw base64 (no prefix, no http), convert to object URL for stability
+      if (!audioSource.startsWith('data:') && !audioSource.startsWith('http')) {
+        try {
+          const binaryString = window.atob(audioSource);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: 'audio/mpeg' });
+          url = URL.createObjectURL(blob);
+        } catch (e) {
+          console.error('❌ [Approach 1] Base64 decoding failed:', e);
+          reject(new Error('Invalid audio data'));
+          return;
+        }
       }
+      
+      audio.src = url;
 
       audio.onended = () => {
         console.log('🔊 [Approach 1] Audio playback finished');
+        if (url !== audioSource) URL.revokeObjectURL(url);
         resolve();
       };
       
       audio.onerror = (e) => {
         console.error('❌ [Approach 1] Audio playback error:', e);
+        if (url !== audioSource) URL.revokeObjectURL(url);
         reject(new Error('Audio playback failed'));
       };
 
-      audio.play().catch(reject);
+      audio.play().catch((err) => {
+        if (url !== audioSource) URL.revokeObjectURL(url);
+        reject(err);
+      });
     });
   };
 

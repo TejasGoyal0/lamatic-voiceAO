@@ -1,16 +1,4 @@
-'use client';
-
-/**
- * APPROACH 1: Audio Capture Module
- * 
- * Direct microphone capture using getUserMedia.
- * NO Cloudflare RealtimeKit dependencies.
- * 
- * Features:
- * - VAD (Voice Activity Detection)
- * - Pause detection
- * - Audio blob recording for sending to Lamatic
- */
+import { encodeWAV } from './wav-encoder';
 
 export interface AudioCaptureConfig {
   onPauseDetected?: (audioBlob: Blob | null) => void;
@@ -44,11 +32,11 @@ export class AudioCapture {
   private audioContext: AudioContext | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private analyserNode: AnalyserNode | null = null;
+  private processorNode: ScriptProcessorNode | null = null;
   private timeDomainData: Float32Array | null = null;
 
   // Recording
-  private mediaRecorder: MediaRecorder | null = null;
-  private audioChunks: Blob[] = [];
+  private pcmBuffer: Float32Array[] = [];
 
   // State
   private isRunning = false;
@@ -68,126 +56,81 @@ export class AudioCapture {
   // Smoothing
   private smoothedEnergy = 0;
   private readonly smoothingFactor = 0.3;
-  private readonly hysteresisRatio = 1.3;
+  private readonly hysteresisRatio = 2.5; 
+  private readonly minSpeechDuration = 300; 
 
   constructor(config: AudioCaptureConfig = {}) {
-    this.pauseDuration = config.pauseDuration ?? 3000;
-    this.calibrationDuration = config.calibrationDuration ?? 500;
+    this.pauseDuration = config.pauseDuration ?? 1200;
+    this.calibrationDuration = config.calibrationDuration ?? 1000;
     this.onPauseDetected = config.onPauseDetected ?? (() => {});
     this.onSpeechStart = config.onSpeechStart ?? (() => {});
     this.onError = config.onError ?? (() => {});
   }
 
   async start(): Promise<void> {
-    if (this.isRunning) {
-      throw new Error('AudioCapture already running');
-    }
+    if (this.isRunning) return;
 
     try {
-      console.log('🎤 [AudioCapture] Requesting microphone...');
-      
-      // Get microphone access
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: false,
       });
 
-      console.log('✓ [AudioCapture] Microphone access granted');
-
-      // Set up Web Audio API for VAD
       this.audioContext = new AudioContext();
       this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+      
+      // Analyser for VAD
       this.analyserNode = this.audioContext.createAnalyser();
       this.analyserNode.fftSize = 2048;
-      this.analyserNode.smoothingTimeConstant = 0.3;
-      this.sourceNode.connect(this.analyserNode);
       this.timeDomainData = new Float32Array(this.analyserNode.fftSize);
 
-      // Set up MediaRecorder for capturing audio
-      this.setupMediaRecorder();
+      // Processor for raw PCM (Bypasses MediaRecorder)
+      this.processorNode = this.audioContext.createScriptProcessor(4096, 1, 1);
+      this.processorNode.onaudioprocess = (e) => {
+        if (!this.isRunning) return;
+        const input = e.inputBuffer.getChannelData(0);
+        if (this.isSpeaking) {
+          this.pcmBuffer.push(new Float32Array(input));
+        }
+      };
 
-      // Initialize state
+      this.sourceNode.connect(this.analyserNode);
+      this.sourceNode.connect(this.processorNode);
+      this.processorNode.connect(this.audioContext.destination);
+
       this.isRunning = true;
       this.isCalibrating = true;
       this.calibrationStartTime = Date.now();
-      this.calibrationSamples = [];
       this.silenceStartTime = Date.now();
 
-      // Start analysis loop
       this.analysisInterval = setInterval(() => this.analyze(), 50);
-
-      console.log('✓ [AudioCapture] Started successfully');
+      console.log('✓ [AudioCapture] Started with RAW PCM pipeline');
     } catch (error) {
-      console.error('❌ [AudioCapture] Start failed:', error);
       this.onError(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
   }
 
-  private setupMediaRecorder(): void {
-    if (!this.mediaStream) return;
-
-    // Determine supported MIME type
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : MediaRecorder.isTypeSupported('audio/webm')
-        ? 'audio/webm'
-        : 'audio/mp4';
-
-    this.mediaRecorder = new MediaRecorder(this.mediaStream, { mimeType });
-    this.audioChunks = [];
-
-    this.mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        this.audioChunks.push(event.data);
-      }
-    };
-
-    this.mediaRecorder.onstop = () => {
-      const audioBlob = new Blob(this.audioChunks, { type: mimeType });
-      console.log(`📦 [AudioCapture] Audio blob created: ${audioBlob.size} bytes`);
-      this.audioChunks = [];
-      this.onPauseDetected(audioBlob);
-    };
-
-    // Start recording
-    this.mediaRecorder.start(100); // Collect data every 100ms
-  }
-
   private analyze(): void {
     if (!this.analyserNode || !this.timeDomainData) return;
 
-    // Get audio data
     this.analyserNode.getFloatTimeDomainData(this.timeDomainData);
-
-    // Compute RMS energy
     let sum = 0;
     for (let i = 0; i < this.timeDomainData.length; i++) {
       sum += this.timeDomainData[i] * this.timeDomainData[i];
     }
     const rawEnergy = Math.sqrt(sum / this.timeDomainData.length);
-    
-    // Apply EMA smoothing
     this.smoothedEnergy = this.smoothingFactor * rawEnergy + (1 - this.smoothingFactor) * this.smoothedEnergy;
     this.currentEnergy = this.smoothedEnergy;
 
     const now = Date.now();
 
-    // Calibration phase
     if (this.isCalibrating) {
       this.calibrationSamples.push(rawEnergy);
-      
       if (now - this.calibrationStartTime >= this.calibrationDuration) {
-        // Calculate noise floor from calibration samples
         if (this.calibrationSamples.length > 0) {
           const sorted = [...this.calibrationSamples].sort((a, b) => a - b);
-          // Use 75th percentile as noise floor
-          const percentileIndex = Math.floor(sorted.length * 0.75);
-          this.noiseFloor = Math.max(sorted[percentileIndex], 0.005);
+          this.noiseFloor = Math.max(sorted[Math.floor(sorted.length * 0.75)], 0.005);
         }
         this.isCalibrating = false;
         console.log(`✓ [AudioCapture] Calibration complete. Noise floor: ${this.noiseFloor.toFixed(4)}`);
@@ -195,91 +138,73 @@ export class AudioCapture {
       return;
     }
 
-    // Compute thresholds
     const speechThreshold = this.noiseFloor * this.hysteresisRatio;
-    const silenceThreshold = this.noiseFloor;
+    const silenceThreshold = this.noiseFloor * 1.1;
 
-    // State transitions
     if (!this.isSpeaking && this.smoothedEnergy > speechThreshold) {
-      // Speech started
-      this.isSpeaking = true;
-      this.speechStartTime = now;
-      this.onSpeechStart();
-      
-      // Start new recording segment
-      if (this.mediaRecorder && this.mediaRecorder.state === 'inactive') {
-        this.audioChunks = [];
-        this.mediaRecorder.start(100);
+      if (this.speechStartTime === 0) this.speechStartTime = now;
+      if (now - this.speechStartTime >= this.minSpeechDuration) {
+        this.isSpeaking = true;
+        this.silenceStartTime = 0;
+        this.pcmBuffer = []; // Start fresh capture
+        console.log(`🗣️ [AudioCapture] Speech started!`);
+        this.onSpeechStart();
       }
     } else if (this.isSpeaking && this.smoothedEnergy < silenceThreshold) {
-      // Potential silence
-      if (this.silenceStartTime === 0 || this.silenceStartTime > this.speechStartTime) {
-        this.silenceStartTime = now;
+      if (this.silenceStartTime === 0) this.silenceStartTime = now;
+      if (now - this.silenceStartTime >= this.pauseDuration) {
+        this.finalizeSegment();
       }
-
-      const silenceDuration = now - this.silenceStartTime;
-      
-      if (silenceDuration >= this.pauseDuration) {
-        // Pause detected
-        this.isSpeaking = false;
-        this.segmentCount++;
-        
-        console.log(`⏸ [AudioCapture] Pause detected. Segment: ${this.segmentCount}, Silence: ${silenceDuration}ms`);
-        
-        // Stop recording and trigger callback
-        if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-          this.mediaRecorder.stop();
-        }
-        
-        // Reset silence timer
-        this.silenceStartTime = now;
-      }
-    } else if (this.isSpeaking) {
-      // Still speaking, reset silence timer
-      this.silenceStartTime = now;
-    }
-
-    // Slowly update noise floor during silence
-    if (!this.isSpeaking && this.smoothedEnergy < this.noiseFloor * 2) {
-      this.noiseFloor = 0.995 * this.noiseFloor + 0.005 * this.smoothedEnergy;
+    } else if (this.smoothedEnergy > silenceThreshold) {
+      if (this.isSpeaking) this.silenceStartTime = 0;
     }
   }
 
+  private finalizeSegment(): void {
+    this.isSpeaking = false;
+    this.segmentCount++;
+    this.speechStartTime = 0;
+    this.silenceStartTime = 0;
+
+    if (this.pcmBuffer.length > 0) {
+      // Flatten chunks into one array
+      const length = this.pcmBuffer.reduce((acc, curr) => acc + curr.length, 0);
+      const flat = new Float32Array(length);
+      let offset = 0;
+      for (const chunk of this.pcmBuffer) {
+        flat.set(chunk, offset);
+        offset += chunk.length;
+      }
+      
+      const audioBlob = encodeWAV(flat, this.audioContext?.sampleRate || 44100);
+      console.log(`📦 [AudioCapture] WAV Blob created: ${audioBlob.size} bytes`);
+      this.onPauseDetected(audioBlob);
+    }
+    this.pcmBuffer = [];
+  }
+
   stop(): void {
-    console.log('⏹ [AudioCapture] Stopping...');
-    
     this.isRunning = false;
-
-    if (this.analysisInterval) {
-      clearInterval(this.analysisInterval);
-      this.analysisInterval = null;
+    if (this.analysisInterval) clearInterval(this.analysisInterval);
+    if (this.isSpeaking) this.finalizeSegment();
+    
+    if (this.processorNode) {
+      this.processorNode.disconnect();
+      this.processorNode = null;
     }
-
-    if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-      this.mediaRecorder.stop();
-    }
-    this.mediaRecorder = null;
-
     if (this.sourceNode) {
       this.sourceNode.disconnect();
       this.sourceNode = null;
     }
-
     if (this.audioContext) {
       this.audioContext.close();
       this.audioContext = null;
     }
-
     if (this.mediaStream) {
       this.mediaStream.getTracks().forEach(track => track.stop());
       this.mediaStream = null;
     }
-
-    this.analyserNode = null;
-    this.timeDomainData = null;
-    this.audioChunks = [];
-
-    console.log('✓ [AudioCapture] Stopped');
+    this.pcmBuffer = [];
   }
 
   getState(): AudioCaptureState {

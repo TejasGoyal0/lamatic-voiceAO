@@ -22,13 +22,8 @@ interface GraphQLRequest {
   variables?: Record<string, unknown>;
 }
 
-interface ExecuteWorkflowRequest {
-  workflowId: string;
-  topic: string;
-}
-
 async function graphqlRequest(query: string, variables?: Record<string, unknown>) {
-  console.log(`📡 [LamaticAPI] Requesting GraphQL with variables: ${JSON.stringify(variables, null, 2)}`);
+  console.log(`📡 [LamaticAPI] Requesting GraphQL...`);
   
   const response = await fetch(GRAPHQL_ENDPOINT, {
     method: "POST",
@@ -55,23 +50,16 @@ async function graphqlRequest(query: string, variables?: Record<string, unknown>
   return responseData.data;
 }
 
-async function executeWorkflow(workflowId: string, transcript: string) {
-  // Use 'sampleInput' as confirmed by the user's working cURL command
-  const query = `
-    query ExecuteWorkflow($workflowId: String!, $sampleInput: String!) {
-      executeWorkflow(
-        workflowId: $workflowId
-        payload: { sampleInput: $sampleInput }
-      ) {
-        status
-        result
-      }
-    }
-  `;
+/**
+ * Execute Workflow via GraphQL
+ * Matches the user's provided structure for sampleInput mapping
+ */
+async function executeWorkflow(workflowId: string, inputString: string) {
+  const query = `query ExecuteWorkflow($workflowId: String!, $sampleInput: String) { executeWorkflow(workflowId: $workflowId, payload: { sampleInput: $sampleInput }) { status result } }`;
 
   const variables = { 
     workflowId: workflowId, 
-    sampleInput: transcript 
+    sampleInput: inputString 
   };
   
   const data = await graphqlRequest(query, variables);
@@ -81,18 +69,7 @@ async function executeWorkflow(workflowId: string, transcript: string) {
 async function checkStatus(requestId: string) {
   const query = `
     query CheckStatus($requestId: String!) {
-      checkStatus(requestId: $requestId) {
-        status
-        input
-        output
-        nodes {
-          nodeName
-          status
-          output
-        }
-        statusCode
-        timeTakenInSeconds
-      }
+      checkStatus(requestId: $requestId)
     }
   `;
 
@@ -129,49 +106,161 @@ async function pollUntilComplete(requestId: string) {
 
 function extractResponseText(output: unknown): string {
   if (!output) return '';
+  
+  // If it's a string, return it directly
   if (typeof output === 'string') return output;
+  
   if (typeof output === 'object' && output !== null) {
-    const obj = output as Record<string, unknown>;
-    // Check common response field names
-    if (obj.aiResponse) return String(obj.aiResponse);
-    if (obj.summary) return String(obj.summary);
-    if (obj.response) return String(obj.response);
-    if (obj.text) return String(obj.text);
-    if (obj.message) return String(obj.message);
-    if (obj.content) return String(obj.content);
+    const obj = output as Record<string, any>;
+
+    // 1. Search for known "Success" keys anywhere in the current object
+    const successKeys = ['transcribe_text', 'transcript', 'aiResponse', 'response', 'text'];
+    for (const key of successKeys) {
+      if (obj[key] && typeof obj[key] === 'string' && obj[key].length > 0) {
+        return obj[key];
+      }
+    }
+
+    // 2. Search for "Error" keys to provide feedback
+    if (obj.error && typeof obj.error === 'string') return `ERROR: ${obj.error}`;
+
+    // 3. Dive into common wrappers (Recursion)
+    if (obj.data && obj.data !== output) return extractResponseText(obj.data);
+    if (obj.output && obj.output !== output) return extractResponseText(obj.output);
+    if (obj.result && obj.result !== output) return extractResponseText(obj.result);
+    if (obj.input && obj.input !== output && !obj.output) {
+       // If we ONLY have input and no output/result, maybe it's still running or failed
+       // We don't return the input as the result, but we might log it
+    }
     
-    // If it's a result object from this workflow, it might be nested
-    if (obj.result) return extractResponseText(obj.result);
+    // 4. Handle 'nodes' array (Look for the most recent result)
+    if (Array.isArray(obj.nodes)) {
+      for (let i = obj.nodes.length - 1; i >= 0; i--) {
+        const node = obj.nodes[i];
+        if (node.output) {
+          const res = extractResponseText(node.output);
+          // Only return if it's not just stringified JSON (i.e., we found a real field)
+          if (res && !res.startsWith('{') && !res.startsWith('[')) return res;
+        }
+      }
+    }
+    
+    // 5. Hard Discovery: Check every value for a string that doesn't look like base64
+    for (const key in obj) {
+      const val = obj[key];
+      if (typeof val === 'string' && val.length > 0 && val.length < 5000 && !val.startsWith('UklGR')) {
+        // This is likely our response text!
+        return val;
+      }
+    }
   }
-  return JSON.stringify(output);
+
+  // Fallback: If we can't find anything, return a snippet for debugging instead of the whole huge blob
+  const stringified = JSON.stringify(output);
+  return stringified.length > 500 ? stringified.substring(0, 500) + "..." : stringified;
 }
+
+function extractAudioBase64(output: unknown): string | null {
+  if (!output || typeof output !== 'object') return null;
+  const obj = output as Record<string, any>;
+  
+  // 1. Search for known "Audio" keys
+  const audioKeys = ['audio_base64', 'audio', 'base64Audio'];
+  for (const key of audioKeys) {
+    if (obj[key] && typeof obj[key] === 'string' && obj[key].length > 1000) {
+      return obj[key];
+    }
+  }
+  
+  // 2. Dive into common wrappers (Recursion)
+  if (obj.data && obj.data !== output) return extractAudioBase64(obj.data);
+  if (obj.output && obj.output !== output) return extractAudioBase64(obj.output);
+  if (obj.result && obj.result !== output) return extractAudioBase64(obj.result);
+  
+  // 3. Handle 'nodes' array
+  if (Array.isArray(obj.nodes)) {
+    for (let i = obj.nodes.length - 1; i >= 0; i--) {
+      const audio = extractAudioBase64(obj.nodes[i].output);
+      if (audio) return audio;
+    }
+  }
+
+  // 4. Hard Discovery: Check every value for a long string starting with SUQz (MP3) or UklGR (WAV)
+  for (const key in obj) {
+    const val = obj[key];
+    if (typeof val === 'string' && val.length > 5000) {
+      // Common audio base64 headers
+      if (val.startsWith('SUQz') || val.startsWith('//uQ') || val.startsWith('/+NI') || val.startsWith('UklGR')) {
+        return val;
+      }
+    }
+  }
+
+  return null;
+}
+
+// Fixed Workflow ID for GraphQL
+const WORKFLOW_ID = "e6318509-e57e-452f-b117-eee35611ac6f";
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json() as { workflowId: string; transcript: string };
-    const { workflowId, transcript } = body;
+    const body = await request.json();
 
-    // Support both 'topic' (old) and 'transcript' (new) for compatibility
-    const inputText = transcript || (body as any).topic;
+    // CASE 1: DIRECT POLLING
+    if (body.requestId) {
+      console.log(`⌛ [LamaticAPI] Direct polling request for requestId: ${body.requestId}`);
+      const pollResult = await pollUntilComplete(body.requestId);
+      return NextResponse.json({
+        success: true,
+        text: extractResponseText(pollResult.output),
+        audio: extractAudioBase64(pollResult.output),
+        status: 'success',
+      });
+    }
 
-    // Force English mode hint to prevent the LLM from switching to Hindi
-    // This is prepended to the user's input to guide the LLM's response language.
-    const flavoredInput = `(Strict English Mode) ${inputText}`;
+    // CASE 2: EXECUTE WORKFLOW (GraphQL)
+    console.log(`📤 [LamaticAPI] Switching to GraphQL Approach...`);
+    
+    // Extract input string (WAV Base64 or Text Prompt)
+    let inputString = "";
+    if (body.audioData) {
+      inputString = body.audioData;
+      console.log(`  📎 Sending WAV Base64 (Header: ${inputString.substring(0, 10)})`);
+    } else {
+      const inputText = body.transcript || body.topic || body.prompt || "";
+      inputString = `(Strict English Mode) ${inputText}`;
+      console.log(`  📝 Sending Text Prompt: "${inputString.substring(0, 30)}..."`);
+    }
 
-    console.log(`📤 [LamaticAPI] Executing workflow ${workflowId} with text: "${flavoredInput.substring(0, 50)}..."`);
+    const executeResult = await executeWorkflow(WORKFLOW_ID, inputString);
+    
+    if (executeResult.status === 'failed') {
+      throw new Error(`Workflow execution failed: ${JSON.stringify(executeResult.result)}`);
+    }
 
-    // Execute the workflow
-    const executeResult = await executeWorkflow(workflowId, flavoredInput);
-    console.log('📥 [LamaticAPI] Execute result:', JSON.stringify(executeResult, null, 2));
+    const requestId = executeResult.result?.requestId || executeResult.requestId;
+    let finalResult;
+    
+    if (requestId) {
+      console.log(`⌛ [LamaticAPI] Workflow is asynchronous. Polling for requestId: ${requestId}...`);
+      const pollResult = await pollUntilComplete(requestId);
+      finalResult = pollResult; 
+    } else {
+      console.log(`✅ [LamaticAPI] Workflow finished synchronously.`);
+      finalResult = executeResult.result;
+    }
 
-    // Extract response text from result field
-    const responseText = extractResponseText(executeResult.result);
-    console.log('✅ [LamaticAPI] Got response:', responseText.substring(0, 100));
+    const responseText = extractResponseText(finalResult);
+    const audioBase64 = extractAudioBase64(finalResult);
+
+    console.log('✅ [LamaticAPI] Final text response:', responseText.substring(0, 50));
+    if (audioBase64) console.log('✅ [LamaticAPI] Audio response found:', audioBase64.substring(0, 20), '...');
 
     return NextResponse.json({
       success: true,
       text: responseText,
-      status: executeResult.status || 'success',
+      audio: audioBase64,
+      status: 'success',
     });
 
   } catch (error) {
