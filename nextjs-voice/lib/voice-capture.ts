@@ -1,23 +1,5 @@
 'use client';
 
-/**
- * VoiceCapture - On-device voice analysis (VAD + pause detection)
- * 
- * =============================================================================
- * CLIENT-ONLY MODULE
- * =============================================================================
- * 
- * This module uses Web Audio API and must only run in the browser.
- * The 'use client' directive ensures Next.js doesn't try to run this on the server.
- * 
- * MEDIASTREAM OWNERSHIP:
- * - This module does NOT own the MediaStream
- * - It receives an external stream via startWithMediaStream()
- * - RealtimeKitTransport owns the stream (acquired via SDK)
- * 
- * =============================================================================
- */
-
 export interface VoiceCaptureConfig {
   onPauseDetected?: (data: PauseDetectedData) => void;
   onSpeechStart?: (data: SpeechStartData) => void;
@@ -148,9 +130,7 @@ export class VoiceCapture {
     this.speechThreshold = this.effectiveThreshold * this.config.hysteresisRatio;
   }
 
-  /**
-   * Start with external MediaStream (primary method for RealtimeKit integration)
-   */
+
   async startWithMediaStream(mediaStream: MediaStream): Promise<void> {
     if (this.isRunning) {
       console.warn('VoiceCapture already running');
@@ -185,10 +165,7 @@ export class VoiceCapture {
     });
   }
 
-  /**
-   * Legacy start method (standalone mode with own getUserMedia)
-   * @deprecated Use startWithMediaStream() for RealtimeKit integration
-   */
+
   async start(): Promise<void> {
     if (this.isRunning) {
       console.warn('VoiceCapture already running');

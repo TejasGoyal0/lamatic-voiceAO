@@ -1,276 +1,219 @@
-# Voice Capture with Cloudflare RealtimeKit
+# Voice AI Platform
 
-A browser-based voice capture system with real-time Voice Activity Detection (VAD), pause detection, and low-latency audio streaming via Cloudflare RealtimeKit.
+A real-time voice AI assistant built with Next.js that uses **Lamatic.ai** as its middleware orchestrator. Two distinct architectures are implemented side-by-side for comparison:
 
-## What It Does
+- **Approach 1 (Lamatic-Only):** Captures audio locally and sends it directly to Lamatic for STT → LLM → TTS processing in a single roundtrip.
+- **Approach 2 (Cloudflare + External STT):** Streams audio via Cloudflare RealtimeKit (WebRTC), performs STT externally with ElevenLabs, and sends transcripts to Lamatic for LLM processing with separate TTS.
 
-1. **Captures audio** from your microphone via Cloudflare RealtimeKit SDK
-2. **Analyzes speech** in real-time using Web Audio API
-3. **Detects pauses** (3+ seconds of silence) to identify segment boundaries
-4. **Sends control messages** through RealtimeKit when pauses are detected
-5. **Visualizes** energy levels and speech state in the UI
+---
 
 ## Architecture
 
+### Approach 1 — Lamatic-Only
+
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  BROWSER                                                                    │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  RealtimeKitTransport                                               │   │
-│  │  ┌─────────────────┐    ┌─────────────────┐                         │   │
-│  │  │ RealtimeKit SDK │───▶│   MediaStream   │──────┐                  │   │
-│  │  │ (owns mic)      │    │   (audio track) │      │                  │   │
-│  │  └─────────────────┘    └─────────────────┘      │                  │   │
-│  │          │                                       │                  │   │
-│  │          ▼                                       │                  │   │
-│  │  ┌─────────────────┐                             │                  │   │
-│  │  │  Cloudflare SFU │ ◀── Audio streaming         │                  │   │
-│  │  │  (WebRTC)       │                             │                  │   │
-│  │  └─────────────────┘                             │                  │   │
-│  │          │                                       │                  │   │
-│  │          ▼                                       ▼                  │   │
-│  │  ┌─────────────────┐                   ┌─────────────────────┐     │   │
-│  │  │  Chat Channel   │ ◀── PAUSE/        │    VoiceCapture     │     │   │
-│  │  │  (control msgs) │     SPEECH_START  │    (analysis only)  │     │   │
-│  │  └─────────────────┘                   │                     │     │   │
-│  │                                        │  AudioContext       │     │   │
-│  └────────────────────────────────────────│  AnalyserNode       │─────┘   │
-│                                           │  VAD Algorithm      │         │
-│  ┌─────────────────────────────────────┐  │  Pause Detection    │         │
-│  │  VoiceSession (Orchestration)       │  └─────────────────────┘         │
-│  │  - Coordinates Transport + Capture  │                                  │
-│  │  - Handles events                   │                                  │
-│  └─────────────────────────────────────┘                                  │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  VoiceUI (React Component)                                          │   │
-│  │  - Start/Stop buttons                                               │   │
-│  │  - Energy meter visualization                                       │   │
-│  │  - Status indicators                                                │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-                              │
-                              │ POST /api/join
-                              ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  SERVER (Next.js API Route)                                                 │
-│                                                                             │
-│  /api/join                                                                  │
-│  1. Creates a meeting via Cloudflare API                                    │
-│  2. Adds participant to meeting                                             │
-│  3. Returns authToken to client                                             │
-│                                                                             │
-│  Environment variables (server-only):                                       │
-│  - CF_ACCOUNT_ID                                                            │
-│  - CF_API_TOKEN                                                             │
-│  - REALTIMEKIT_APP_ID                                                       │
-│  - REALTIMEKIT_PRESET_NAME                                                  │
-└─────────────────────────────────────────────────────────────────────────────┘
+Browser                         Next.js Server                 Lamatic.ai
+┌──────────────┐                ┌──────────────┐              ┌──────────────┐
+│ getUserMedia  │                │              │              │              │
+│      ↓        │                │              │              │  STT Node    │
+│ AudioCapture  │  WAV blob      │  /api/lamatic│  GraphQL     │      ↓       │
+│  (VAD)        │───────────────►│  (proxy)     │─────────────►│  LLM Node    │
+│      ↓        │                │              │◄─────────────│      ↓       │
+│ playAudio()   │◄───────────────│              │  text+audio  │  TTS Node    │
+└──────────────┘   base64 audio  └──────────────┘              └──────────────┘
 ```
 
-## VAD Algorithm
+**Data flow:**
 
-The Voice Activity Detection uses several techniques for robust speech detection:
+1. `AudioCapture` uses the Web Audio API and a custom VAD to detect speech/silence.
+2. On pause detection (configurable silence threshold), the captured PCM audio is encoded to WAV.
+3. The WAV blob is base64-encoded and sent to `/api/lamatic` (Next.js API route).
+4. The server-side proxy triggers a Lamatic GraphQL workflow that handles STT → LLM → TTS.
+5. The response (text + base64 audio) is returned to the client for playback.
 
-### 1. Adaptive Noise Floor Calibration
-- First 500ms: Samples ambient noise to establish baseline
-- Noise floor updates slowly during silence periods
+**Key files:**
+| File | Purpose |
+|------|---------|
+| `components/approach1/VoiceClient.tsx` | UI component, state management, audio playback |
+| `lib/approach1/lamatic-client.ts` | API client with `AbortController` for barge-in |
+| `lib/approach1/audio-capture.ts` | Microphone capture + VAD + WAV encoding |
+| `lib/approach1/wav-encoder.ts` | PCM → WAV encoding utility |
+| `app/api/lamatic/route.ts` | Server-side Lamatic GraphQL proxy |
 
-### 2. RMS Energy Computation
+---
+
+### Approach 2 — Cloudflare + External STT
+
 ```
-energy = sqrt(sum(sample²) / numSamples)
-```
-
-### 3. Hysteresis Thresholds
-- **Speech threshold**: `noiseFloor × 1.3` (to start speaking)
-- **Silence threshold**: `noiseFloor × 1.0` (to stop speaking)
-- Prevents rapid toggling at boundary
-
-### 4. EMA Smoothing
-```
-smoothedEnergy = 0.7 × previousEnergy + 0.3 × currentEnergy
-```
-
-### 5. Pause Detection
-- Triggers after **3 seconds** of continuous silence
-- Increments segment counter
-- Sends `PAUSE` control message
-
-## Control Messages
-
-When events occur, JSON messages are sent through RealtimeKit's chat channel:
-
-### PAUSE Message
-```json
-{
-  "type": "PAUSE",
-  "segment": 1,
-  "silenceDuration": 3016,
-  "timestamp": 1770292406270
-}
+Browser                         Next.js Server                 External APIs
+┌──────────────┐                ┌──────────────┐              ┌──────────────┐
+│ RealtimeKit   │  WebRTC        │              │              │              │
+│ (audio stream)│~~~~~~~~~~~~~~~~│  /api/join   │              │  Cloudflare  │
+│      ↓        │                │              │              │  RealtimeKit │
+│  STTClient    │───────────────►│  /api/       │─────────────►│              │
+│ (ElevenLabs)  │  audio chunks  │  transcribe  │  ElevenLabs  │  STT API     │
+│      ↓        │                │              │              └──────────────┘
+│ LamaticClient │───────────────►│  /api/lamatic│─────────────►┌──────────────┐
+│ (transcript)  │  text          │  (proxy)     │  GraphQL     │  Lamatic.ai  │
+│      ↓        │                │              │◄─────────────│  LLM Node    │
+│  TTSClient    │───────────────►│  /api/tts    │─────────────►└──────────────┘
+│ (ElevenLabs)  │  text          │              │  ElevenLabs  ┌──────────────┐
+│  playback     │◄───────────────│              │  stream      │  TTS API     │
+└──────────────┘   audio stream  └──────────────┘              └──────────────┘
 ```
 
-### SPEECH_START Message
-```json
-{
-  "type": "SPEECH_START",
-  "timestamp": 1770292417502
-}
-```
+**Data flow:**
 
-These messages can be received by other participants or a server-side bot in the same meeting.
+1. `RealtimeKitClient` connects to Cloudflare via WebRTC and exposes the local `MediaStream`.
+2. `STTClient` takes the MediaStream, chunks it into WebM, and sends it to ElevenLabs for transcription.
+3. On pause detection (local VAD), the current transcript is flushed and sent to Lamatic via `LamaticClient`.
+4. The LLM response text is passed to `TTSClient`, which streams audio from ElevenLabs TTS API.
+
+**Key files:**
+| File | Purpose |
+|------|---------|
+| `components/approach2/VoiceClient.tsx` | UI component, orchestrates all clients |
+| `lib/approach2/realtimekit-client.ts` | Cloudflare WebRTC connection + local VAD |
+| `lib/approach2/stt-client.ts` | ElevenLabs STT via `/api/transcribe` proxy |
+| `lib/approach2/lamatic-client.ts` | Sends transcript to Lamatic LLM |
+| `lib/approach2/tts-client.ts` | ElevenLabs TTS streaming playback |
+| `app/api/join/route.ts` | Creates Cloudflare meeting + auth token |
+| `app/api/transcribe/route.ts` | ElevenLabs STT proxy |
+| `app/api/tts/route.ts` | ElevenLabs TTS streaming proxy |
+
+---
+
+## Lamatic as Middleware
+
+Both approaches use [Lamatic.ai](https://lamatic.ai) as the central middleware layer. Lamatic orchestrates multi-step GenAI workflows via a visual flow builder, combining STT, LLM, TTS, and RAG nodes into a single pipeline.
+
+### How it works
+
+1. **Workflow trigger:** The Next.js API route (`/api/lamatic`) sends a GraphQL `executeWorkflow` mutation to Lamatic's API.
+2. **Async processing:** The workflow runs asynchronously. The server polls `checkStatus` until it completes.
+3. **Pipeline nodes:** Inside Lamatic, the workflow executes nodes in sequence (e.g., ElevenLabs STT → GPT LLM → ElevenLabs TTS).
+4. **Response extraction:** The server extracts text and optional audio from the workflow output and returns it to the client.
+
+### Why Lamatic
+
+| Benefit                  | Detail                                                                      |
+| ------------------------ | --------------------------------------------------------------------------- |
+| **No vendor lock-in**    | Swap STT/LLM/TTS providers by changing Lamatic nodes, not code              |
+| **Single API surface**   | One GraphQL endpoint for the entire voice pipeline                          |
+| **Visual orchestration** | Build and iterate on voice flows without redeploying                        |
+| **RAG support**          | Add knowledge bases, vector search, and context injection via Lamatic nodes |
+
+---
+
+## Latency Benchmarking
+
+Measured end-to-end roundtrip latency from VAD pause trigger to first audio playback. Values are based on real-world testing and vary with network conditions, audio length, and LLM response size.
+
+| Metric                      | Approach 1 (Lamatic-Only) | Approach 2 (Cloudflare + STT) |
+| --------------------------- | ------------------------- | ----------------------------- |
+| **End-to-end roundtrip**    | **25–30s**                | **8–14s**                     |
+| **Lamatic flow execution**  | ~14s                      | ~4–7s                         |
+| **Client/network overhead** | ~11–16s                   | ~4–7s                         |
+| **Audio upload**            | base64 WAV POST           | N/A (WebRTC stream)           |
+| **STT**                     | Inside Lamatic flow       | ElevenLabs direct (parallel)  |
+| **TTS**                     | Inside Lamatic flow       | ElevenLabs stream (parallel)  |
+| **Real-time transcript**    | No                        | Yes (partial updates)         |
+| **Barge-in support**        | Yes (`AbortController`)   | Yes (VAD interrupt)           |
+
+### Why Approach 1 is ~3x slower
+
+- Audio is base64-encoded and uploaded as a full POST body (~11–16s of client/network overhead alone).
+- STT + LLM + TTS run **sequentially** within a single Lamatic workflow — no parallelism.
+- The Lamatic flow handles the full pipeline (STT → LLM → TTS), resulting in ~14s flow execution.
+- Polling adds additional latency between workflow completion and response delivery.
+
+### Why Approach 2 is ~2–3x faster
+
+- Audio streams via WebRTC with near-zero upload latency — no base64 encoding overhead.
+- STT runs **in parallel** with audio capture (chunked transcription happens as the user speaks).
+- Lamatic only handles LLM (no STT/TTS), cutting flow execution to ~4–7s.
+- TTS streams audio as it generates, allowing playback to start before the full response is ready.
+
+---
+
+## Shared Components
+
+| File                                | Purpose                                                     |
+| ----------------------------------- | ----------------------------------------------------------- |
+| `lib/voice-capture.ts`              | Core VAD engine using Web Audio API (used by local testing) |
+| `lib/voice-session.ts`              | Orchestrates VoiceCapture + RealtimeKitTransport            |
+| `lib/voice-session-local.ts`        | Standalone VAD session (no Cloudflare)                      |
+| `lib/realtimekit-transport.ts`      | Cloudflare RealtimeKit WebRTC transport                     |
+| `lib/lamatic-graphql-client.ts`     | Direct Lamatic GraphQL client (not used by approach routes) |
+| `components/VoiceUILocal.tsx`       | Local VAD testing UI (no AI processing)                     |
+| `app/api/lamatic-callback/route.ts` | Long-polling callback endpoint for Lamatic webhooks         |
+
+---
 
 ## Setup
 
-### 1. Install Dependencies
+### Prerequisites
+
+- Node.js 18+
+- npm
+
+### Environment Variables
+
+Create a `.env.local` file:
+
+```env
+# Lamatic
+LAMATIC_API_KEY=your_lamatic_api_key
+LAMATIC_PROJECT_ID=your_project_id
+LAMATIC_WORKFLOW_ID=your_workflow_id
+
+# ElevenLabs (Approach 2)
+ELEVENLABS_API_KEY=your_elevenlabs_api_key
+
+# Cloudflare RealtimeKit (Approach 2)
+CF_ACCOUNT_ID=your_cloudflare_account_id
+CF_API_TOKEN=your_cloudflare_api_token
+REALTIMEKIT_APP_ID=your_realtimekit_app_id
+REALTIMEKIT_PRESET_NAME=group_call_host
+```
+
+### Run
 
 ```bash
-cd nextjs-voice
 npm install
-```
-
-### 2. Configure Environment
-
-```bash
-cp .env.local.example .env.local
-```
-
-Edit `.env.local` with your Cloudflare credentials:
-
-| Variable | Where to Find |
-|----------|---------------|
-| `CF_ACCOUNT_ID` | Cloudflare Dashboard → Account ID (sidebar) |
-| `CF_API_TOKEN` | dash.cloudflare.com/profile/api-tokens → Create Token with "Realtime: Admin" |
-| `REALTIMEKIT_APP_ID` | dash.cloudflare.com → Realtime → Kit → Your App |
-| `REALTIMEKIT_PRESET_NAME` | Your preset name (e.g., `group_call_host`) |
-
-### 3. Run Development Server
-
-```bash
 npm run dev
 ```
 
-### 4. Open in Browser
+Open [http://localhost:3000](http://localhost:3000) and choose an approach.
 
-Navigate to [http://localhost:3000](http://localhost:3000)
+---
 
-## File Structure
+## Project Structure
 
 ```
 nextjs-voice/
 ├── app/
-│   ├── api/
-│   │   └── join/
-│   │       └── route.ts      # Server: Creates meeting, returns authToken
-│   ├── globals.css
-│   ├── layout.tsx
-│   └── page.tsx              # Main page
+│   ├── page.tsx                    # Home — approach selector
+│   ├── layout.tsx                  # Root layout
+│   ├── approach-1/page.tsx         # Approach 1 page
+│   ├── approach-2/page.tsx         # Approach 2 page
+│   └── api/
+│       ├── lamatic/route.ts        # Lamatic GraphQL proxy
+│       ├── lamatic-callback/route.ts # Long-polling callback
+│       ├── join/route.ts           # Cloudflare RealtimeKit auth
+│       ├── transcribe/route.ts     # ElevenLabs STT proxy
+│       └── tts/route.ts           # ElevenLabs TTS proxy
 ├── components/
-│   ├── VoiceUI.tsx           # Cloudflare-enabled UI
-│   └── VoiceUILocal.tsx      # Local-only UI (no Cloudflare)
+│   ├── approach1/VoiceClient.tsx   # Approach 1 UI
+│   ├── approach2/VoiceClient.tsx   # Approach 2 UI
+│   └── VoiceUILocal.tsx            # Local VAD testing
 ├── lib/
-│   ├── voice-capture.ts      # VAD + pause detection
-│   ├── realtimekit-transport.ts  # SDK wrapper, owns MediaStream
-│   ├── voice-session.ts      # Orchestration (Cloudflare mode)
-│   └── voice-session-local.ts    # Orchestration (local mode)
-├── .env.local.example
-├── package.json
-└── README.md
+│   ├── approach1/                  # Approach 1 client libraries
+│   ├── approach2/                  # Approach 2 client libraries
+│   ├── voice-capture.ts            # Core VAD engine
+│   ├── voice-session.ts            # Session orchestrator
+│   ├── voice-session-local.ts      # Local session (no Cloudflare)
+│   ├── realtimekit-transport.ts    # WebRTC transport layer
+│   └── lamatic-graphql-client.ts   # Direct GraphQL client
+└── package.json
 ```
-
-## Key Design Decisions
-
-### 1. MediaStream Ownership
-The **RealtimeKitTransport** owns the microphone:
-- SDK calls `getUserMedia()` internally
-- Provides stream to VoiceCapture for analysis
-- Ensures single point of control
-
-### 2. Client/Server Separation
-- **Server**: Holds API credentials, mints tokens
-- **Client**: All audio processing, no secrets exposed
-
-### 3. Chat as Control Channel
-RealtimeKit's chat feature is repurposed for control messages:
-- No additional infrastructure needed
-- Messages reach all participants instantly
-- Can be received by server-side bots
-
-## Usage
-
-1. Click **Start Recording**
-2. Speak into your microphone
-3. Watch the energy meter respond
-4. After 3 seconds of silence → **PAUSE detected**
-5. Segment counter increments
-6. Control message sent via RealtimeKit
-
-## Console Logging
-
-The app outputs detailed logs to the browser console:
-
-```
-✓ RealtimeKit connected
-✓ Voice capture started (analysis mode)
-───────────────────────────────────────────
-🎤 SPEECH STARTED
-  Energy: 0.0508
-  After silence: 1.05 ms
-───────────────────────────────────────────
-📤 Sending SPEECH_START control message...
-✓ Message sent via chat channel
-
-═══════════════════════════════════════════
-⏸ PAUSE DETECTED
-  Segment: 1
-  Silence duration: 3016 ms
-  Noise floor: 0.0025
-  Threshold: 0.0150
-═══════════════════════════════════════════
-📤 Sending PAUSE control message...
-✓ Message sent via chat channel
-```
-
-## Local Mode (No Cloudflare)
-
-To test without Cloudflare credentials, edit `app/page.tsx`:
-
-```tsx
-// import VoiceUI from '../components/VoiceUI';
-import VoiceUILocal from '../components/VoiceUILocal';
-
-export default function Home() {
-  return (
-    <main className="min-h-screen bg-gray-50 py-12">
-      <VoiceUILocal />
-    </main>
-  );
-}
-```
-
-Local mode uses direct `getUserMedia()` and only does VAD locally (no streaming).
-
-## Browser Requirements
-
-- Modern browser (Chrome, Firefox, Edge, Safari)
-- HTTPS or localhost (required for microphone access)
-- Microphone permission granted
-
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| "Authentication error" | Check API token has "Realtime: Admin" permission |
-| "No meeting ID" | Verify REALTIMEKIT_APP_ID exists in dashboard |
-| Microphone not working | Check browser permissions, use HTTPS |
-| Concurrent init error | Don't click Start multiple times rapidly |
-
-## Next Steps
-
-Potential enhancements:
-- [ ] Server-side bot to receive pause events
-- [ ] Transcription integration on pause
-- [ ] Multi-participant support
-- [ ] Recording segments between pauses
-- [ ] WebSocket fallback for control messages

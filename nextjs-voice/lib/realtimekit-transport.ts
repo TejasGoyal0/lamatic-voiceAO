@@ -1,23 +1,5 @@
 'use client';
 
-/**
- * RealtimeKitTransport - Audio transport via Cloudflare RealtimeKit
- * 
- * =============================================================================
- * CLIENT-ONLY MODULE
- * =============================================================================
- * 
- * This module uses the Cloudflare RealtimeKit SDK and must only run in browser.
- * The 'use client' directive ensures Next.js doesn't try to import SDK on server.
- * 
- * MEDIASTREAM OWNERSHIP:
- * - This module OWNS the MediaStream (acquired via SDK's enableAudio())
- * - Exposes stream via getMediaStream() for VoiceCapture analysis
- * - SDK manages WebRTC track lifecycle internally
- * 
- * =============================================================================
- */
-
 export interface RealtimeKitTransportConfig {
   authToken: string;
   onConnected?: (info: ConnectionInfo) => void;
@@ -53,7 +35,6 @@ export interface TransportState {
   hasMediaStream: boolean;
 }
 
-// RealtimeKit SDK types (minimal, for internal use)
 interface RTKMeeting {
   join(): Promise<void>;
   leave(): Promise<void>;
@@ -101,57 +82,25 @@ export class RealtimeKitTransport {
     this.onError = config.onError ?? console.error;
   }
 
-  /**
-   * Connect to RealtimeKit and start audio streaming
-   * 
-   * Execution order:
-   * 1. Dynamic import SDK (client-only)
-   * 2. Initialize with auth token
-   * 3. Join meeting room
-   * 4. Enable audio (SDK acquires microphone)
-   * 5. Expose MediaStream for external analysis
-   */
   async connect(): Promise<void> {
-    // Dynamic import - SDK only loads in browser
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const RealtimeKitClient = (await import('@cloudflare/realtimekit')).default;
 
     try {
-      // Initialize SDK - RealtimeKitClient is the default export
       this.meeting = await RealtimeKitClient.init({
         authToken: this.authToken,
-        defaults: {
-          audio: false, // Enable manually below
-          video: false, // Audio-only
-        },
-        modules: {
-          devTools: {
-            logs: false,
-          },
-        },
+        defaults: { audio: false, video: false },
+        modules: { devTools: { logs: false } },
       });
 
       this.setupEventListeners();
-
-      // Join the meeting
       await this.meeting!.join();
-
-      // Enable audio - SDK calls getUserMedia internally
       await this.meeting!.self.enableAudio();
-
-      // Get MediaStream from SDK for external analysis
       await this.acquireMediaStreamFromSDK();
 
       this.isConnected = true;
-
       this.onConnected({
         meetingId: this.meeting!.meta.meetingId,
         participantId: this.meeting!.self.userId,
-      });
-
-      console.log('RealtimeKitTransport connected', {
-        meetingId: this.meeting!.meta.meetingId,
-        audioEnabled: this.meeting!.self.audioEnabled,
       });
     } catch (error) {
       this.onError(error as Error);
@@ -159,31 +108,13 @@ export class RealtimeKitTransport {
     }
   }
 
-  /**
-   * Acquire MediaStream from SDK after audio is enabled
-   */
   private async acquireMediaStreamFromSDK(): Promise<void> {
     if (!this.meeting) throw new Error('Meeting not initialized');
-
     const audioTrack = this.meeting.self.audioTrack;
-
-    if (!audioTrack) {
-      throw new Error('Audio track not available from SDK');
-    }
-
-    // Wrap SDK's track in MediaStream for VoiceCapture
+    if (!audioTrack) throw new Error('Audio track not available from SDK');
     this._mediaStream = new MediaStream([audioTrack]);
-
-    console.log('MediaStream acquired from SDK', {
-      trackId: audioTrack.id,
-      trackLabel: audioTrack.label,
-    });
   }
 
-  /**
-   * Get MediaStream owned by SDK
-   * Call AFTER connect() completes
-   */
   getMediaStream(): MediaStream | null {
     return this._mediaStream;
   }
@@ -191,22 +122,18 @@ export class RealtimeKitTransport {
   private setupEventListeners(): void {
     if (!this.meeting) return;
 
-    // Room left
     this.meeting.self.on('roomLeft', ({ state }: { state: string }) => {
       this.isConnected = false;
       this._mediaStream = null;
       this.onDisconnected({ reason: state });
     });
 
-    // Audio track updates
     this.meeting.self.on('audioUpdate', () => {
       if (this.meeting?.self.audioEnabled && this.meeting.self.audioTrack) {
         this._mediaStream = new MediaStream([this.meeting.self.audioTrack]);
-        console.log('MediaStream updated after audio change');
       }
     });
 
-    // Chat messages (control channel)
     this.meeting.chat.on('chatUpdate', ({ message }: { message: any }) => {
       if (message.type === 'text' && message.message.startsWith('{')) {
         try {
@@ -221,35 +148,17 @@ export class RealtimeKitTransport {
       }
     });
 
-    // Connection quality
     this.meeting.self.on('mediaScoreUpdate', ({ kind, score }: { kind: string; score: number }) => {
       if (kind === 'audio' && score < 5) {
-        console.warn('Audio quality degraded:', score);
+        console.warn('[RealtimeKit] Audio quality degraded:', score);
       }
     });
   }
 
-  /**
-   * Send control message to all participants
-   */
   async sendControlMessage(message: ControlMessage): Promise<void> {
-    if (!this.isConnected || !this.meeting) {
-      console.warn('Cannot send control message: not connected');
-      return;
-    }
-
+    if (!this.isConnected || !this.meeting) return;
     const payload = JSON.stringify(message);
-    console.log('📨 RealtimeKit sendControlMessage:');
-    console.log('  Type:', message.type);
-    console.log('  Payload:', payload);
-    
-    try {
-      await this.meeting.chat.sendTextMessage(payload);
-      console.log('✓ Message sent via chat channel');
-    } catch (error) {
-      console.error('✗ Failed to send message:', error);
-      throw error;
-    }
+    await this.meeting.chat.sendTextMessage(payload);
   }
 
   async mute(): Promise<void> {
@@ -267,11 +176,7 @@ export class RealtimeKitTransport {
 
   async disconnect(): Promise<void> {
     if (this.meeting) {
-      try {
-        await this.meeting.leave();
-      } catch {
-        // Ignore cleanup errors
-      }
+      try { await this.meeting.leave(); } catch { /* ignore cleanup errors */ }
       this.meeting = null;
     }
     this.isConnected = false;

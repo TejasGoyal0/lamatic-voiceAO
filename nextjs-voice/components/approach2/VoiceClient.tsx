@@ -1,14 +1,5 @@
 'use client';
 
-/**
- * APPROACH 2: VoiceClient Component
- * 
- * Transport: Cloudflare RealtimeKit (WebRTC)
- * STT: ElevenLabs (external, browser-side)
- * LLM: Lamatic (receives transcript on PAUSE, returns AI text)
- * TTS: ElevenLabs (streaming audio playback)
- */
-
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RealtimeKitClient, RealtimeKitState } from '../../lib/approach2/realtimekit-client';
 import { STTClient, TranscriptResult } from '../../lib/approach2/stt-client';
@@ -44,11 +35,8 @@ export default function VoiceClient() {
   const ttsClientRef = useRef<TTSClient | null>(null);
   const animationFrameRef = useRef<number | null>(null);
 
-  // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      cleanup();
-    };
+    return () => { cleanup(); };
   }, []);
 
   const cleanup = async () => {
@@ -70,29 +58,16 @@ export default function VoiceClient() {
     }
   };
 
-  // Poll RealtimeKit state for visualization
   const startStatePolling = useCallback(() => {
-    console.log('🔄 [VoiceClient] Starting state polling...');
-    let pollCount = 0;
     const poll = () => {
       if (realtimeKitRef.current) {
         const rtkState = realtimeKitRef.current.getState();
-        pollCount++;
-        // Log every 60 frames (~1 second)
-        if (pollCount % 60 === 0) {
-          console.log(`📊 [VoiceClient] Poll #${pollCount}: energy=${rtkState.currentEnergy.toFixed(4)}, speaking=${rtkState.isSpeaking}`);
-        }
         setState(prev => ({
           ...prev,
           energy: rtkState.currentEnergy,
           isSpeaking: rtkState.isSpeaking,
           segmentCount: rtkState.segmentCount,
         }));
-      } else {
-        if (pollCount % 60 === 0) {
-          console.log('⚠️ [VoiceClient] Poll: realtimeKitRef.current is null');
-        }
-        pollCount++;
       }
       animationFrameRef.current = requestAnimationFrame(poll);
     };
@@ -109,9 +84,7 @@ export default function VoiceClient() {
   const handleStart = async () => {
     try {
       setState(prev => ({ ...prev, status: 'connecting', error: null }));
-      console.log('🎤 [Approach 2] Starting with Cloudflare RealtimeKit...');
 
-      // 1. Get auth token from server
       const response = await fetch('/api/join', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -124,63 +97,49 @@ export default function VoiceClient() {
       }
 
       const { token } = await response.json();
-      console.log('✓ [Approach 2] Auth token received');
 
-      // 2. Initialize TTS client (ElevenLabs)
       ttsClientRef.current = new TTSClient({
         onPlaybackStart: () => {
-          console.log('🔊 [Approach 2] TTS playback started');
           setState(prev => ({ ...prev, status: 'playing' }));
         },
         onPlaybackEnd: () => {
-          console.log('✓ [Approach 2] TTS playback ended');
-          // Resume listening after TTS finishes
           setState(prev => ({ ...prev, status: 'listening' }));
           startStatePolling();
         },
-        onError: (error) => {
-          console.error('❌ [Approach 2] TTS error:', error);
-          // Resume listening even on error
+        onError: () => {
           setState(prev => ({ ...prev, status: 'listening' }));
           startStatePolling();
         },
       });
 
-      // 3. Initialize Lamatic client
       lamaticClientRef.current = new LamaticClient({
         onResponse: handleLamaticResponse,
         onError: handleLamaticError,
       });
 
-      // 4. Initialize STT client (ElevenLabs)
       sttClientRef.current = new STTClient({
         onPartialTranscript: (result) => {
           setState(prev => ({ ...prev, partialTranscript: result.text }));
         },
         onFinalTranscript: async (result) => {
-          console.log('📝 [Approach 2] Final transcript:', result.text);
-          setState(prev => ({ 
-            ...prev, 
+          setState(prev => ({
+            ...prev,
             finalTranscript: result.text,
             partialTranscript: null,
           }));
         },
         onError: (error) => {
-          console.error('❌ [Approach 2] STT error:', error);
+          console.error('[STTClient] Error:', error);
         },
       });
 
-      // 5. Initialize RealtimeKit client
       realtimeKitRef.current = new RealtimeKitClient({
         authToken: token,
-        pauseDuration: 1200,
-        calibrationDuration: 1000,
+        pauseDuration: 3000,
+        calibrationDuration: 500,
 
         onConnected: () => {
-          console.log('✓ [Approach 2] RealtimeKit connected');
           setState(prev => ({ ...prev, status: 'listening' }));
-          
-          // Start STT with RealtimeKit's media stream
           const stream = realtimeKitRef.current?.getMediaStream();
           if (stream && sttClientRef.current) {
             sttClientRef.current.start(stream);
@@ -188,50 +147,38 @@ export default function VoiceClient() {
         },
 
         onDisconnected: () => {
-          console.log('⏹ [Approach 2] RealtimeKit disconnected');
           setState(prev => ({ ...prev, status: 'idle' }));
           stopStatePolling();
         },
 
         onPauseDetected: async (data) => {
-          console.log('⏸ [Approach 2] Pause detected:', data);
           setState(prev => ({ ...prev, status: 'processing' }));
           stopStatePolling();
 
-          // Flush STT to get final transcript
           let transcript = '';
           if (sttClientRef.current) {
             transcript = await sttClientRef.current.flush();
-            setState(prev => ({ 
-              ...prev, 
+            setState(prev => ({
+              ...prev,
               finalTranscript: transcript,
               partialTranscript: null,
             }));
           }
 
-          // Send transcript to Lamatic
           if (transcript && lamaticClientRef.current) {
-            console.log('📤 [Approach 2] Sending transcript to Lamatic:', transcript);
             await lamaticClientRef.current.sendTranscript(transcript, data);
           } else {
-            console.log('⚠️ [Approach 2] No transcript to send');
-            // Resume listening even if no transcript
             setState(prev => ({ ...prev, status: 'listening' }));
             startStatePolling();
           }
         },
 
         onSpeechStart: () => {
-          console.log('🗣️ [Approach 2] Speech started - interrupting AI if playing');
-          // BARGE-IN: Stop AI from speaking immediately when user interrupts
-          if (ttsClientRef.current) {
-            ttsClientRef.current.stop();
-          }
           setState(prev => ({ ...prev, status: 'listening', isSpeaking: true }));
         },
 
         onError: (error) => {
-          console.error('❌ [Approach 2] RealtimeKit error:', error);
+          console.error('[RealtimeKit] Error:', error);
           setState(prev => ({
             ...prev,
             status: 'error',
@@ -245,7 +192,7 @@ export default function VoiceClient() {
       startStatePolling();
 
     } catch (error) {
-      console.error('❌ [Approach 2] Start error:', error);
+      console.error('[VoiceClient] Start error:', error);
       setState(prev => ({
         ...prev,
         status: 'error',
@@ -255,53 +202,37 @@ export default function VoiceClient() {
   };
 
   const handleLamaticResponse = async (response: LamaticResponse) => {
-    console.log('📥 [Approach 2] Lamatic GraphQL response:', response);
-    
-    // GraphQL API returns the AI response directly (no long-polling needed)
     if (response.success && response.text) {
       const aiText = response.text;
-      console.log('✓ [Approach 2] Got AI response:', aiText.substring(0, 100) + '...');
-      setState(prev => ({
-        ...prev,
-        aiResponse: aiText,
-      }));
+      setState(prev => ({ ...prev, aiResponse: aiText }));
 
-      // Send to TTS
       if (ttsClientRef.current) {
-        console.log('🔊 [Approach 2] Sending to TTS');
         setState(prev => ({ ...prev, status: 'playing' }));
         stopStatePolling();
         await ttsClientRef.current.speak(aiText);
       } else {
-        // No TTS, just resume listening
         setState(prev => ({ ...prev, status: 'listening' }));
         startStatePolling();
       }
     } else {
-      console.log('⚠️ [Approach 2] GraphQL returned no AI response:', response.error || 'unknown error');
       setState(prev => ({ ...prev, status: 'listening' }));
       startStatePolling();
     }
   };
 
   const handleLamaticError = (error: Error) => {
-    console.error('❌ [Approach 2] Lamatic error:', error);
-    // Don't fail completely, just log and continue
+    console.error('[VoiceClient] Lamatic error:', error);
     setState(prev => ({ ...prev, status: 'listening' }));
     startStatePolling();
   };
 
   const handleStop = async () => {
-    console.log('⏹ [Approach 2] Stopping...');
     stopStatePolling();
-    
-    // Stop TTS if playing
     if (ttsClientRef.current) {
       ttsClientRef.current.stop();
     }
-    
     await cleanup();
-    
+
     setState({
       status: 'idle',
       error: null,
@@ -325,7 +256,6 @@ export default function VoiceClient() {
 
   return (
     <div className="bg-white rounded-xl shadow-lg p-8">
-      {/* Status Badge */}
       <div className="flex justify-center mb-6">
         <span className={`px-4 py-2 rounded-full text-sm font-medium ${
           state.status === 'idle' ? 'bg-gray-100 text-gray-600' :
@@ -335,23 +265,21 @@ export default function VoiceClient() {
           state.status === 'playing' ? 'bg-purple-100 text-purple-700' :
           'bg-red-100 text-red-700'
         }`}>
-          {state.status === 'idle' && '⚪ Ready'}
-          {state.status === 'connecting' && '🔄 Connecting to Cloudflare...'}
-          {state.status === 'listening' && (state.isSpeaking ? '🎤 Listening...' : '👂 Waiting for speech...')}
-          {state.status === 'processing' && '🧠 Processing with Lamatic...'}
-          {state.status === 'playing' && '🔊 Playing response...'}
-          {state.status === 'error' && '❌ Error'}
+          {state.status === 'idle' && 'Ready'}
+          {state.status === 'connecting' && 'Connecting to Cloudflare...'}
+          {state.status === 'listening' && (state.isSpeaking ? 'Listening...' : 'Waiting for speech...')}
+          {state.status === 'processing' && 'Processing...'}
+          {state.status === 'playing' && 'Playing response...'}
+          {state.status === 'error' && 'Error'}
         </span>
       </div>
 
-      {/* Segment Counter */}
       {state.segmentCount > 0 && (
         <div className="text-center mb-4 text-sm text-gray-500">
           Segments: {state.segmentCount}
         </div>
       )}
 
-      {/* Energy Meter */}
       <div className="mb-6">
         <div className="flex justify-between text-sm text-gray-500 mb-2">
           <span>Audio Level</span>
@@ -365,7 +293,6 @@ export default function VoiceClient() {
         </div>
       </div>
 
-      {/* Live Transcript */}
       {(state.partialTranscript || state.finalTranscript) && (
         <div className="mb-4 p-4 bg-gray-50 rounded-lg">
           <div className="text-xs text-gray-500 mb-1">
@@ -377,7 +304,6 @@ export default function VoiceClient() {
         </div>
       )}
 
-      {/* AI Response Display */}
       {state.aiResponse && (
         <div className="mb-4 p-4 bg-purple-50 rounded-lg">
           <div className="text-xs text-purple-500 mb-1">AI Response:</div>
@@ -385,35 +311,32 @@ export default function VoiceClient() {
         </div>
       )}
 
-      {/* Error Display */}
       {state.error && (
         <div className="mb-4 p-4 bg-red-50 rounded-lg text-red-700">
           {state.error}
         </div>
       )}
 
-      {/* Controls */}
       <div className="flex justify-center gap-4">
         {!isActive ? (
           <button
             onClick={handleStart}
             className="px-8 py-3 bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700 transition-colors"
           >
-            🎤 Start Recording
+            Start Recording
           </button>
         ) : (
           <button
             onClick={handleStop}
             className="px-8 py-3 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition-colors"
           >
-            ⏹ Stop
+            Stop
           </button>
         )}
       </div>
 
-      {/* Architecture Info */}
       <div className="mt-8 pt-6 border-t text-xs text-gray-400 text-center">
-        <p>Approach 2: RealtimeKit → ElevenLabs STT → Lamatic LLM → TTS</p>
+        <p>Approach 2: RealtimeKit + ElevenLabs STT + Lamatic LLM + TTS</p>
       </div>
     </div>
   );

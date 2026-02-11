@@ -1,12 +1,5 @@
 'use client';
 
-/**
- * APPROACH 2: TTS Client (ElevenLabs Streaming)
- * 
- * Text-to-Speech using ElevenLabs API with streaming playback.
- * Receives text, sends to /api/tts, streams audio chunks to speaker.
- */
-
 export interface TTSClientConfig {
   onPlaybackStart?: () => void;
   onPlaybackEnd?: () => void;
@@ -15,51 +8,33 @@ export interface TTSClientConfig {
 }
 
 export class TTSClient {
-  // Callbacks
   private onPlaybackStart: () => void;
   private onPlaybackEnd: () => void;
   private onError: (error: Error) => void;
-
-  // Config
   private voiceId: string;
-
-  // Audio playback
   private audioContext: AudioContext | null = null;
   private audioQueue: AudioBuffer[] = [];
   private isPlaying = false;
   private currentSource: AudioBufferSourceNode | null = null;
   private nextStartTime = 0;
-
-  // Abort controller for cancellation
   private abortController: AbortController | null = null;
 
   constructor(config: TTSClientConfig = {}) {
     this.onPlaybackStart = config.onPlaybackStart ?? (() => {});
     this.onPlaybackEnd = config.onPlaybackEnd ?? (() => {});
     this.onError = config.onError ?? (() => {});
-    this.voiceId = config.voiceId ?? 'EXAVITQu4vr4xnSDxMaL'; // Default: Bella
+    this.voiceId = config.voiceId ?? 'EXAVITQu4vr4xnSDxMaL';
   }
 
-  /**
-   * Speak text using ElevenLabs TTS with streaming playback
-   */
   async speak(text: string): Promise<void> {
-    if (!text.trim()) {
-      console.warn('[TTSClient] Empty text, skipping');
-      return;
-    }
+    if (!text.trim()) return;
 
-    console.log(`🔊 [TTSClient] Speaking: "${text.substring(0, 50)}..."`);
-
-    // Cancel any ongoing playback
     this.stop();
 
-    // Initialize audio context
     if (!this.audioContext || this.audioContext.state === 'closed') {
       this.audioContext = new AudioContext();
     }
 
-    // Resume if suspended (browser autoplay policy)
     if (this.audioContext.state === 'suspended') {
       await this.audioContext.resume();
     }
@@ -83,60 +58,37 @@ export class TTSClient {
         throw new Error('No response body');
       }
 
-      console.log('✓ [TTSClient] Receiving audio stream...');
       this.onPlaybackStart();
-
-      // Stream and play audio chunks
       await this.streamAudio(response.body);
 
     } catch (error) {
-      if ((error as Error).name === 'AbortError') {
-        console.log('⏹ [TTSClient] Playback aborted');
-        return;
-      }
-      console.error('❌ [TTSClient] TTS error:', error);
+      if ((error as Error).name === 'AbortError') return;
+      console.error('[TTSClient] Error:', error);
       this.onError(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
-  /**
-   * Stream audio from response body and play in real-time
-   */
   private async streamAudio(body: ReadableStream<Uint8Array>): Promise<void> {
     const reader = body.getReader();
     const chunks: Uint8Array[] = [];
-    
-    // For now, to keep it stable and fast, we'll collect the chunks but start playback 
-    // as soon as we have enough data (e.g. 50KB) or the stream ends.
-    // Real-time chunk decoding with Web Audio API is extremely complex for MP3.
-    const PREBUFFER_SIZE = 64 * 1024; // 64KB
     let accumulatedSize = 0;
-    let prebuffered = false;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        
         if (done) break;
         if (value) {
           chunks.push(value);
           accumulatedSize += value.length;
-
-          // If we haven't started playing yet and we have enough data, 
-          // we could potentially start. But decodeAudioData needs the whole file.
-          // So we continue collecting.
         }
       }
 
-      // Combine all chunks
       const audioData = new Uint8Array(accumulatedSize);
       let offset = 0;
       for (const chunk of chunks) {
         audioData.set(chunk, offset);
         offset += chunk.length;
       }
-
-      console.log(`✓ [TTSClient] Received ${accumulatedSize} bytes of audio`);
 
       if (this.audioContext && !this.abortController?.signal.aborted) {
         const audioBuffer = await this.audioContext.decodeAudioData(audioData.buffer);
@@ -150,32 +102,26 @@ export class TTSClient {
     }
   }
 
-  /**
-   * Play an AudioBuffer through the speakers
-   */
   private async playAudioBuffer(buffer: AudioBuffer): Promise<void> {
     if (!this.audioContext) return;
 
     return new Promise((resolve, reject) => {
       try {
         this.isPlaying = true;
-        
+
         const source = this.audioContext!.createBufferSource();
         source.buffer = buffer;
         source.connect(this.audioContext!.destination);
-        
+
         source.onended = () => {
           this.isPlaying = false;
           this.currentSource = null;
-          console.log('✓ [TTSClient] Playback complete');
           this.onPlaybackEnd();
           resolve();
         };
 
         this.currentSource = source;
         source.start(0);
-        
-        console.log(`▶️ [TTSClient] Playing audio (${buffer.duration.toFixed(2)}s)`);
 
       } catch (error) {
         this.isPlaying = false;
@@ -184,25 +130,14 @@ export class TTSClient {
     });
   }
 
-  /**
-   * Stop any ongoing playback
-   */
   stop(): void {
-    console.log('⏹ [TTSClient] Stopping...');
-
-    // Abort ongoing fetch
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
     }
 
-    // Stop current audio source
     if (this.currentSource) {
-      try {
-        this.currentSource.stop();
-      } catch (e) {
-        // Ignore - may already be stopped
-      }
+      try { this.currentSource.stop(); } catch (_) { /* already stopped */ }
       this.currentSource = null;
     }
 
@@ -210,19 +145,12 @@ export class TTSClient {
     this.audioQueue = [];
   }
 
-  /**
-   * Check if currently playing
-   */
   getIsPlaying(): boolean {
     return this.isPlaying;
   }
 
-  /**
-   * Clean up resources
-   */
   async dispose(): Promise<void> {
     this.stop();
-    
     if (this.audioContext && this.audioContext.state !== 'closed') {
       await this.audioContext.close();
       this.audioContext = null;

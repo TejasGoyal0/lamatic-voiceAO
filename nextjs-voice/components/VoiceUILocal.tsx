@@ -1,12 +1,5 @@
 'use client';
 
-/**
- * VoiceUILocal - Local-only Voice Capture (no Cloudflare)
- * 
- * Use this component to test VAD and pause detection without
- * needing Cloudflare RealtimeKit credentials.
- */
-
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createLocalVoiceSession, LocalSession } from '../lib/voice-session-local';
 
@@ -32,25 +25,18 @@ export default function VoiceUILocal() {
   const sessionRef = useRef<LocalSession | null>(null);
   const animationFrameRef = useRef<number | null>(null);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-      if (sessionRef.current) {
-        sessionRef.current.stop().catch(console.error);
-      }
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+      if (sessionRef.current) sessionRef.current.stop().catch(console.error);
     };
   }, []);
 
-  // Poll session state for visualization
   const startStatePolling = useCallback(() => {
     const poll = () => {
       if (sessionRef.current) {
         const sessionState = sessionRef.current.getState();
         const vcState = sessionState.voiceCapture;
-
         if (vcState) {
           setState(prev => ({
             ...prev,
@@ -79,37 +65,28 @@ export default function VoiceUILocal() {
       setState(prev => ({ ...prev, status: 'connecting', error: null }));
 
       const session = createLocalVoiceSession({
-        pauseDuration: 3000, // 3 seconds
+        pauseDuration: 3000,
         calibrationDuration: 500,
 
         onPauseDetected: (data) => {
-          console.log('⏸ Pause detected:', data);
           setState(prev => ({
             ...prev,
             status: 'paused',
             segmentCount: data.segmentCount,
           }));
         },
-
         onSpeechStart: () => {
           setState(prev => ({ ...prev, status: 'speaking' }));
         },
-
         onConnected: () => {
           setState(prev => ({ ...prev, status: 'listening' }));
         },
-
         onDisconnected: () => {
           setState(prev => ({ ...prev, status: 'idle' }));
           stopStatePolling();
         },
-
         onError: (error) => {
-          setState(prev => ({
-            ...prev,
-            status: 'error',
-            error: error.message,
-          }));
+          setState(prev => ({ ...prev, status: 'error', error: error.message }));
           stopStatePolling();
         },
       });
@@ -119,7 +96,7 @@ export default function VoiceUILocal() {
       startStatePolling();
 
     } catch (error) {
-      console.error('Start error:', error);
+      console.error('[VoiceUILocal] Start error:', error);
       setState(prev => ({
         ...prev,
         status: 'error',
@@ -130,12 +107,10 @@ export default function VoiceUILocal() {
 
   const handleStop = async () => {
     stopStatePolling();
-
     if (sessionRef.current) {
       await sessionRef.current.stop();
       sessionRef.current = null;
     }
-
     setState({
       status: 'idle',
       energy: 0,
@@ -147,8 +122,6 @@ export default function VoiceUILocal() {
   };
 
   const isActive = ['connecting', 'listening', 'speaking', 'paused'].includes(state.status);
-
-  // Energy bar percentage (clamped 0-100)
   const energyPercent = Math.min(100, Math.max(0, state.energy * 500));
   const noiseFloorPercent = Math.min(100, Math.max(0, state.noiseFloor * 500));
 
@@ -159,7 +132,6 @@ export default function VoiceUILocal() {
         Local Mode (no Cloudflare)
       </p>
 
-      {/* Status Indicator */}
       <div className="flex items-center gap-3">
         <div
           className={`w-4 h-4 rounded-full ${
@@ -176,26 +148,22 @@ export default function VoiceUILocal() {
         </span>
       </div>
 
-      {/* Energy Meter */}
       <div className="w-full space-y-2">
         <div className="flex justify-between text-sm text-gray-600">
           <span>Energy Level</span>
           <span>{(state.energy * 100).toFixed(1)}%</span>
         </div>
         <div className="relative h-6 bg-gray-200 rounded-full overflow-hidden">
-          {/* Noise floor indicator */}
           <div
             className="absolute h-full bg-gray-400 opacity-50 transition-all duration-100"
             style={{ width: `${noiseFloorPercent}%` }}
           />
-          {/* Energy bar */}
           <div
             className={`absolute h-full transition-all duration-75 ${
               state.status === 'speaking' ? 'bg-blue-500' : 'bg-green-500'
             }`}
             style={{ width: `${energyPercent}%` }}
           />
-          {/* Threshold marker */}
           <div
             className="absolute h-full w-0.5 bg-red-500"
             style={{ left: `${noiseFloorPercent * 1.3}%` }}
@@ -208,7 +176,6 @@ export default function VoiceUILocal() {
         </div>
       </div>
 
-      {/* Controls */}
       <div className="flex gap-4">
         {!isActive ? (
           <button
@@ -227,14 +194,12 @@ export default function VoiceUILocal() {
         )}
       </div>
 
-      {/* Error Display */}
       {state.error && (
         <div className="w-full p-4 bg-red-100 border border-red-300 rounded-lg text-red-700">
           <strong>Error:</strong> {state.error}
         </div>
       )}
 
-      {/* Instructions */}
       <div className="text-sm text-gray-500 text-center space-y-1">
         <p>Click Start to begin voice capture.</p>
         <p>VAD detects speech vs silence locally.</p>

@@ -1,14 +1,5 @@
 'use client';
 
-/**
- * APPROACH 1: VoiceClient Component
- * 
- * Transport: Direct getUserMedia (NO Cloudflare RealtimeKit)
- * STT: Lamatic (ElevenLabs)
- * LLM: Lamatic
- * TTS: Lamatic (ElevenLabs) → Audio response played in browser
- */
-
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AudioCapture, AudioCaptureState } from '../../lib/approach1/audio-capture';
 import { LamaticClient, LamaticResponse } from '../../lib/approach1/lamatic-client';
@@ -20,6 +11,14 @@ interface VoiceClientState {
   isSpeaking: boolean;
   transcript: string | null;
   aiResponse: string | null;
+  latency?: {
+    total: number;
+    apiParams?: {
+      clientStart: number;
+      apiResponse: number;
+      totalRoundTrip: number;
+    };
+  };
 }
 
 export default function VoiceClient() {
@@ -36,12 +35,10 @@ export default function VoiceClient() {
   const lamaticClientRef = useRef<LamaticClient | null>(null);
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const interactionStartTimeRef = useRef<number>(0);
 
-  // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      cleanup();
-    };
+    return () => { cleanup(); };
   }, []);
 
   const cleanup = () => {
@@ -59,7 +56,6 @@ export default function VoiceClient() {
     }
   };
 
-  // Poll audio capture state for visualization
   const startStatePolling = useCallback(() => {
     const poll = () => {
       if (audioCaptureRef.current) {
@@ -85,44 +81,41 @@ export default function VoiceClient() {
   const handleStart = async () => {
     try {
       setState(prev => ({ ...prev, status: 'connecting', error: null }));
-      console.log('🎤 [Approach 1] Starting voice capture...');
 
-      // Initialize Lamatic client
       lamaticClientRef.current = new LamaticClient({
         onResponse: handleLamaticResponse,
         onError: handleLamaticError,
       });
 
-      // Initialize audio capture with VAD
       audioCaptureRef.current = new AudioCapture({
-        pauseDuration: 1200, // Reduced from 3000ms for responsiveness
+        pauseDuration: 1200,
         calibrationDuration: 1000,
-        
+
         onPauseDetected: async (audioBlob) => {
-          console.log('⏸ [Approach 1] Pause detected, sending audio to Lamatic...');
+          interactionStartTimeRef.current = performance.now();
           setState(prev => ({ ...prev, status: 'processing' }));
-          
-          // Stop polling while processing
           stopStatePolling();
-          
-          // Send audio to Lamatic
+
           if (lamaticClientRef.current && audioBlob) {
             await lamaticClientRef.current.sendAudio(audioBlob);
           }
         },
 
         onSpeechStart: () => {
-          console.log('🎤 [Approach 1] Speech started - interrupting AI if playing');
-          // BARGE-IN: Stop AI from speaking immediately when user interrupts
+          interactionStartTimeRef.current = 0;
+
           if (audioElementRef.current) {
             audioElementRef.current.pause();
             audioElementRef.current.currentTime = 0;
           }
+          if (lamaticClientRef.current) {
+            lamaticClientRef.current.cancelCurrentRequest();
+          }
           setState(prev => ({ ...prev, status: 'listening', isSpeaking: true }));
         },
 
-        onError: (error) => {
-          console.error('❌ [Approach 1] Audio capture error:', error);
+        onError: (error: Error) => {
+          console.error('[AudioCapture] Error:', error);
           setState(prev => ({
             ...prev,
             status: 'error',
@@ -135,10 +128,9 @@ export default function VoiceClient() {
       await audioCaptureRef.current.start();
       setState(prev => ({ ...prev, status: 'listening' }));
       startStatePolling();
-      console.log('✓ [Approach 1] Voice capture started');
 
     } catch (error) {
-      console.error('❌ [Approach 1] Start error:', error);
+      console.error('[VoiceClient] Start error:', error);
       setState(prev => ({
         ...prev,
         status: 'error',
@@ -148,35 +140,38 @@ export default function VoiceClient() {
   };
 
   const handleLamaticResponse = async (response: LamaticResponse) => {
-    console.log('📥 [Approach 1] Lamatic response:', response);
-    
+    let latencyInfo = undefined;
+    if (response.timings) {
+      const playbackStart = performance.now();
+      latencyInfo = {
+        total: playbackStart - response.timings.clientStart,
+        apiParams: response.timings,
+      };
+    }
+
     const responseText = response.text || '';
 
     setState(prev => ({
       ...prev,
       transcript: response.transcript || prev.transcript,
       aiResponse: responseText || prev.aiResponse,
+      latency: latencyInfo,
     }));
 
-    // If we got audio directly from Lamatic (Workflow TTS)
     if (response.audio) {
-      console.log('🔊 [Approach 1] Playing audio from Lamatic workflow...');
       setState(prev => ({ ...prev, status: 'playing' }));
-      await playAudio(response.audio).catch(err => {
-        console.error('❌ [Approach 1] Workflow audio playback failed:', err);
+      await playAudio(response.audio).catch((err: Error) => {
+        console.error('[VoiceClient] Audio playback failed:', err);
       });
-    } 
-    // Fallback: If we got text but no audio, use the local TTS proxy
-    else if (responseText) {
+    } else if (responseText) {
       setState(prev => ({ ...prev, status: 'playing' }));
       try {
-        console.log(`🔊 [Approach 1] Requesting local TTS for: "${responseText.substring(0, 50)}..."`);
         const ttsResponse = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
+          body: JSON.stringify({
             text: responseText,
-            voiceId: '21m00Tcm4TlvDq8ikWAM' 
+            voiceId: '21m00Tcm4TlvDq8ikWAM',
           }),
         });
 
@@ -186,17 +181,16 @@ export default function VoiceClient() {
           await playAudio(audioUrl);
         }
       } catch (err) {
-        console.error('❌ [Approach 1] Local TTS error:', err);
+        console.error('[VoiceClient] TTS error:', err);
       }
     }
 
-    // Resume listening after playback
     setState(prev => ({ ...prev, status: 'listening' }));
     startStatePolling();
   };
 
   const handleLamaticError = (error: Error) => {
-    console.error('❌ [Approach 1] Lamatic error:', error);
+    console.error('[VoiceClient] Lamatic error:', error);
     setState(prev => ({
       ...prev,
       status: 'error',
@@ -209,12 +203,11 @@ export default function VoiceClient() {
       if (!audioElementRef.current) {
         audioElementRef.current = new Audio();
       }
-      
+
       const audio = audioElementRef.current;
       let url = audioSource;
 
-      // If it's raw base64 (no prefix, no http), convert to object URL for stability
-      if (!audioSource.startsWith('data:') && !audioSource.startsWith('http')) {
+      if (!audioSource.startsWith('data:') && !audioSource.startsWith('http') && !audioSource.startsWith('blob:')) {
         try {
           const binaryString = window.atob(audioSource);
           const bytes = new Uint8Array(binaryString.length);
@@ -224,27 +217,25 @@ export default function VoiceClient() {
           const blob = new Blob([bytes], { type: 'audio/mpeg' });
           url = URL.createObjectURL(blob);
         } catch (e) {
-          console.error('❌ [Approach 1] Base64 decoding failed:', e);
+          console.error('[VoiceClient] Base64 decode failed:', e);
           reject(new Error('Invalid audio data'));
           return;
         }
       }
-      
+
       audio.src = url;
 
       audio.onended = () => {
-        console.log('🔊 [Approach 1] Audio playback finished');
         if (url !== audioSource) URL.revokeObjectURL(url);
         resolve();
       };
-      
-      audio.onerror = (e) => {
-        console.error('❌ [Approach 1] Audio playback error:', e);
+
+      audio.onerror = () => {
         if (url !== audioSource) URL.revokeObjectURL(url);
         reject(new Error('Audio playback failed'));
       };
 
-      audio.play().catch((err) => {
+      audio.play().catch((err: Error) => {
         if (url !== audioSource) URL.revokeObjectURL(url);
         reject(err);
       });
@@ -252,10 +243,9 @@ export default function VoiceClient() {
   };
 
   const handleStop = async () => {
-    console.log('⏹ [Approach 1] Stopping...');
     stopStatePolling();
     cleanup();
-    
+
     setState({
       status: 'idle',
       error: null,
@@ -268,7 +258,6 @@ export default function VoiceClient() {
 
   const isActive = ['connecting', 'listening', 'processing', 'playing'].includes(state.status);
 
-  // Energy bar color
   const getEnergyBarColor = () => {
     if (state.status === 'processing') return 'bg-yellow-500';
     if (state.status === 'playing') return 'bg-purple-500';
@@ -278,7 +267,6 @@ export default function VoiceClient() {
 
   return (
     <div className="bg-white rounded-xl shadow-lg p-8">
-      {/* Status Badge */}
       <div className="flex justify-center mb-6">
         <span className={`px-4 py-2 rounded-full text-sm font-medium ${
           state.status === 'idle' ? 'bg-gray-100 text-gray-600' :
@@ -288,16 +276,15 @@ export default function VoiceClient() {
           state.status === 'playing' ? 'bg-purple-100 text-purple-700' :
           'bg-red-100 text-red-700'
         }`}>
-          {state.status === 'idle' && '⚪ Ready'}
-          {state.status === 'connecting' && '🔄 Connecting...'}
-          {state.status === 'listening' && (state.isSpeaking ? '🎤 Listening...' : '👂 Waiting for speech...')}
-          {state.status === 'processing' && '🧠 Processing with Lamatic...'}
-          {state.status === 'playing' && '🔊 Playing response...'}
-          {state.status === 'error' && '❌ Error'}
+          {state.status === 'idle' && 'Ready'}
+          {state.status === 'connecting' && 'Connecting...'}
+          {state.status === 'listening' && (state.isSpeaking ? 'Listening...' : 'Waiting for speech...')}
+          {state.status === 'processing' && 'Processing...'}
+          {state.status === 'playing' && 'Playing response...'}
+          {state.status === 'error' && 'Error'}
         </span>
       </div>
 
-      {/* Energy Meter */}
       <div className="mb-6">
         <div className="flex justify-between text-sm text-gray-500 mb-2">
           <span>Audio Level</span>
@@ -311,7 +298,6 @@ export default function VoiceClient() {
         </div>
       </div>
 
-      {/* Transcript Display */}
       {state.transcript && (
         <div className="mb-4 p-4 bg-gray-50 rounded-lg">
           <div className="text-xs text-gray-500 mb-1">You said:</div>
@@ -319,7 +305,6 @@ export default function VoiceClient() {
         </div>
       )}
 
-      {/* AI Response Display */}
       {state.aiResponse && (
         <div className="mb-4 p-4 bg-blue-50 rounded-lg">
           <div className="text-xs text-blue-500 mb-1">AI Response:</div>
@@ -327,33 +312,51 @@ export default function VoiceClient() {
         </div>
       )}
 
-      {/* Error Display */}
+      {state.latency && (
+        <div className="mb-4 p-3 bg-green-50 rounded-lg text-xs font-mono">
+          <div className="text-green-800 font-bold mb-1">Latency Breakdown</div>
+          <div className="grid grid-cols-2 gap-2 text-green-700">
+            <div>E2E Total:</div>
+            <div className="text-right">{state.latency.total.toFixed(0)} ms</div>
+
+            {state.latency.apiParams && (
+              <>
+                <div className="opacity-75 pl-2">API Roundtrip:</div>
+                <div className="text-right opacity-75">{state.latency.apiParams.totalRoundTrip.toFixed(0)} ms</div>
+                <div className="opacity-75 pl-2">Client/Network:</div>
+                <div className="text-right opacity-75">
+                  {(state.latency.total - state.latency.apiParams.totalRoundTrip).toFixed(0)} ms
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {state.error && (
         <div className="mb-4 p-4 bg-red-50 rounded-lg text-red-700">
           {state.error}
         </div>
       )}
 
-      {/* Controls */}
       <div className="flex justify-center gap-4">
         {!isActive ? (
           <button
             onClick={handleStart}
             className="px-8 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors"
           >
-            🎤 Start Recording
+            Start Recording
           </button>
         ) : (
           <button
             onClick={handleStop}
             className="px-8 py-3 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition-colors"
           >
-            ⏹ Stop
+            Stop
           </button>
         )}
       </div>
 
-      {/* Architecture Info */}
       <div className="mt-8 pt-6 border-t text-xs text-gray-400 text-center">
         <p>Approach 1: getUserMedia → Lamatic (STT + LLM + TTS) → Audio Playback</p>
       </div>

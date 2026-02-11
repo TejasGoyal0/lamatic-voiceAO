@@ -1,11 +1,12 @@
+
 import { encodeWAV } from './wav-encoder';
 
 export interface AudioCaptureConfig {
   onPauseDetected?: (audioBlob: Blob | null) => void;
   onSpeechStart?: () => void;
   onError?: (error: Error) => void;
-  pauseDuration?: number; // ms of silence before pause
-  calibrationDuration?: number; // ms for noise floor calibration
+  pauseDuration?: number;
+  calibrationDuration?: number;
 }
 
 export interface AudioCaptureState {
@@ -18,46 +19,33 @@ export interface AudioCaptureState {
 }
 
 export class AudioCapture {
-  // Config
   private pauseDuration: number;
   private calibrationDuration: number;
-
-  // Callbacks
   private onPauseDetected: (audioBlob: Blob | null) => void;
   private onSpeechStart: () => void;
   private onError: (error: Error) => void;
-
-  // Audio pipeline
   private mediaStream: MediaStream | null = null;
   private audioContext: AudioContext | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private analyserNode: AnalyserNode | null = null;
   private processorNode: ScriptProcessorNode | null = null;
-  private timeDomainData: Float32Array | null = null;
-
-  // Recording
+  private timeDomainData: Float32Array<ArrayBuffer> | null = null;
   private pcmBuffer: Float32Array[] = [];
-
-  // State
   private isRunning = false;
   private isSpeaking = false;
   private isCalibrating = true;
   private currentEnergy = 0;
   private noiseFloor = 0.01;
   private segmentCount = 0;
-
-  // Timing
   private analysisInterval: ReturnType<typeof setInterval> | null = null;
   private calibrationStartTime = 0;
   private silenceStartTime = 0;
   private speechStartTime = 0;
   private calibrationSamples: number[] = [];
-
-  // Smoothing
   private smoothedEnergy = 0;
   private readonly smoothingFactor = 0.3;
-  private readonly hysteresisRatio = 2.5; 
-  private readonly minSpeechDuration = 300; 
+  private readonly hysteresisRatio = 2.5;
+  private readonly minSpeechDuration = 300;
 
   constructor(config: AudioCaptureConfig = {}) {
     this.pauseDuration = config.pauseDuration ?? 1200;
@@ -69,22 +57,16 @@ export class AudioCapture {
 
   async start(): Promise<void> {
     if (this.isRunning) return;
-
     try {
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: false,
       });
-
       this.audioContext = new AudioContext();
       this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
-      
-      // Analyser for VAD
       this.analyserNode = this.audioContext.createAnalyser();
       this.analyserNode.fftSize = 2048;
       this.timeDomainData = new Float32Array(this.analyserNode.fftSize);
-
-      // Processor for raw PCM (Bypasses MediaRecorder)
       this.processorNode = this.audioContext.createScriptProcessor(4096, 1, 1);
       this.processorNode.onaudioprocess = (e) => {
         if (!this.isRunning) return;
@@ -93,18 +75,14 @@ export class AudioCapture {
           this.pcmBuffer.push(new Float32Array(input));
         }
       };
-
       this.sourceNode.connect(this.analyserNode);
       this.sourceNode.connect(this.processorNode);
       this.processorNode.connect(this.audioContext.destination);
-
       this.isRunning = true;
       this.isCalibrating = true;
       this.calibrationStartTime = Date.now();
       this.silenceStartTime = Date.now();
-
       this.analysisInterval = setInterval(() => this.analyze(), 50);
-      console.log('✓ [AudioCapture] Started with RAW PCM pipeline');
     } catch (error) {
       this.onError(error instanceof Error ? error : new Error(String(error)));
       throw error;
@@ -113,7 +91,6 @@ export class AudioCapture {
 
   private analyze(): void {
     if (!this.analyserNode || !this.timeDomainData) return;
-
     this.analyserNode.getFloatTimeDomainData(this.timeDomainData);
     let sum = 0;
     for (let i = 0; i < this.timeDomainData.length; i++) {
@@ -122,7 +99,6 @@ export class AudioCapture {
     const rawEnergy = Math.sqrt(sum / this.timeDomainData.length);
     this.smoothedEnergy = this.smoothingFactor * rawEnergy + (1 - this.smoothingFactor) * this.smoothedEnergy;
     this.currentEnergy = this.smoothedEnergy;
-
     const now = Date.now();
 
     if (this.isCalibrating) {
@@ -133,7 +109,6 @@ export class AudioCapture {
           this.noiseFloor = Math.max(sorted[Math.floor(sorted.length * 0.75)], 0.005);
         }
         this.isCalibrating = false;
-        console.log(`✓ [AudioCapture] Calibration complete. Noise floor: ${this.noiseFloor.toFixed(4)}`);
       }
       return;
     }
@@ -146,8 +121,7 @@ export class AudioCapture {
       if (now - this.speechStartTime >= this.minSpeechDuration) {
         this.isSpeaking = true;
         this.silenceStartTime = 0;
-        this.pcmBuffer = []; // Start fresh capture
-        console.log(`🗣️ [AudioCapture] Speech started!`);
+        this.pcmBuffer = [];
         this.onSpeechStart();
       }
     } else if (this.isSpeaking && this.smoothedEnergy < silenceThreshold) {
@@ -165,9 +139,7 @@ export class AudioCapture {
     this.segmentCount++;
     this.speechStartTime = 0;
     this.silenceStartTime = 0;
-
     if (this.pcmBuffer.length > 0) {
-      // Flatten chunks into one array
       const length = this.pcmBuffer.reduce((acc, curr) => acc + curr.length, 0);
       const flat = new Float32Array(length);
       let offset = 0;
@@ -175,9 +147,7 @@ export class AudioCapture {
         flat.set(chunk, offset);
         offset += chunk.length;
       }
-      
       const audioBlob = encodeWAV(flat, this.audioContext?.sampleRate || 44100);
-      console.log(`📦 [AudioCapture] WAV Blob created: ${audioBlob.size} bytes`);
       this.onPauseDetected(audioBlob);
     }
     this.pcmBuffer = [];
@@ -187,7 +157,6 @@ export class AudioCapture {
     this.isRunning = false;
     if (this.analysisInterval) clearInterval(this.analysisInterval);
     if (this.isSpeaking) this.finalizeSegment();
-    
     if (this.processorNode) {
       this.processorNode.disconnect();
       this.processorNode = null;

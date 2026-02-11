@@ -1,11 +1,3 @@
-/**
- * Voice Capture Demo - Home Page
- * 
- * Navigation to two independent voice architectures:
- * - Approach 1: Lamatic-Only (getUserMedia → Lamatic STT/LLM/TTS)
- * - Approach 2: Cloudflare + External STT (RealtimeKit → ElevenLabs STT → Lamatic LLM)
- */
-
 import Link from 'next/link';
 
 export default function Home() {
@@ -22,7 +14,6 @@ export default function Home() {
         </div>
 
         <div className="grid md:grid-cols-2 gap-8">
-          {/* Approach 1 Card */}
           <Link href="/approach-1" className="block">
             <div className="bg-white rounded-xl shadow-lg p-8 hover:shadow-xl transition-shadow cursor-pointer border-2 border-transparent hover:border-blue-500">
               <div className="text-center mb-6">
@@ -41,19 +32,19 @@ export default function Home() {
 
               <div className="space-y-3 text-sm text-gray-600">
                 <div className="flex items-start gap-2">
-                  <span className="text-blue-500">🎤</span>
+                  <span className="text-blue-500 font-bold">1.</span>
                   <span><strong>Transport:</strong> Direct getUserMedia</span>
                 </div>
                 <div className="flex items-start gap-2">
-                  <span className="text-blue-500">📝</span>
+                  <span className="text-blue-500 font-bold">2.</span>
                   <span><strong>STT:</strong> Lamatic (ElevenLabs)</span>
                 </div>
                 <div className="flex items-start gap-2">
-                  <span className="text-blue-500">🧠</span>
+                  <span className="text-blue-500 font-bold">3.</span>
                   <span><strong>LLM:</strong> Lamatic</span>
                 </div>
                 <div className="flex items-start gap-2">
-                  <span className="text-blue-500">🔊</span>
+                  <span className="text-blue-500 font-bold">4.</span>
                   <span><strong>TTS:</strong> Lamatic (ElevenLabs)</span>
                 </div>
               </div>
@@ -64,7 +55,6 @@ export default function Home() {
             </div>
           </Link>
 
-          {/* Approach 2 Card */}
           <Link href="/approach-2" className="block">
             <div className="bg-white rounded-xl shadow-lg p-8 hover:shadow-xl transition-shadow cursor-pointer border-2 border-transparent hover:border-purple-500">
               <div className="text-center mb-6">
@@ -83,19 +73,19 @@ export default function Home() {
 
               <div className="space-y-3 text-sm text-gray-600">
                 <div className="flex items-start gap-2">
-                  <span className="text-purple-500">🎤</span>
+                  <span className="text-purple-500 font-bold">1.</span>
                   <span><strong>Transport:</strong> Cloudflare RealtimeKit</span>
                 </div>
                 <div className="flex items-start gap-2">
-                  <span className="text-purple-500">📝</span>
+                  <span className="text-purple-500 font-bold">2.</span>
                   <span><strong>STT:</strong> ElevenLabs (external)</span>
                 </div>
                 <div className="flex items-start gap-2">
-                  <span className="text-purple-500">🧠</span>
+                  <span className="text-purple-500 font-bold">3.</span>
                   <span><strong>LLM:</strong> Lamatic (receives transcript)</span>
                 </div>
                 <div className="flex items-start gap-2">
-                  <span className="text-purple-500">🔊</span>
+                  <span className="text-purple-500 font-bold">4.</span>
                   <span><strong>TTS:</strong> Optional (Lamatic trigger)</span>
                 </div>
               </div>
@@ -107,7 +97,6 @@ export default function Home() {
           </Link>
         </div>
 
-        {/* Architecture Comparison */}
         <div className="mt-12 bg-white rounded-xl shadow-lg p-8">
           <h3 className="text-xl font-bold text-gray-900 mb-6 text-center">
             Architecture Comparison
